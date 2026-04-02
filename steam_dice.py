@@ -10,7 +10,7 @@ if os.environ.get("WAYLAND_DISPLAY"):
     os.environ.setdefault("QT_QPA_PLATFORM", "wayland")
 from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QPixmap, QFont
+from PyQt6.QtGui import QPixmap, QFont, QIcon
 
 VERSION = "v0.1.0"
 
@@ -224,6 +224,7 @@ class SteamDice(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon.fromTheme("codes.nora.gDiceRoller"))
     win = SteamDice()
     win.show()
     sys.exit(app.exec())
