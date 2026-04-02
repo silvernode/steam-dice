@@ -236,14 +236,14 @@ class SettingsDialog(QDialog):
         # --- Steam ID ---
         layout.addWidget(QLabel("<b>Steam ID (64-bit)</b>"))
         self.id_edit = QLineEdit(settings.value("steam_id", ""))
-        self.id_edit.setPlaceholderText("e.g. 76561198000000000")
+        self.id_edit.setPlaceholderText("17-digit number only, e.g. 76561198000000000")
         layout.addWidget(self.id_edit)
 
         id_help = QLabel(
-            'Your 17-digit Steam ID. To find it: open your Steam profile in a browser — '
-            'the number in the URL (<i>steamcommunity.com/profiles/<b>XXXXXXXXXXXXXXXXX</b></i>) '
-            'is your ID.<br>'
-            'If your URL uses a custom name instead, look it up at '
+            'Paste the <b>17-digit number only</b> — not the full URL. '
+            'Find it by opening your Steam profile in a browser: the number in '
+            '<i>steamcommunity.com/profiles/<b>XXXXXXXXXXXXXXXXX</b></i> is your ID.<br>'
+            'Using a custom profile URL? Look it up at '
             '<a href="https://steamid.io">steamid.io</a>.'
         )
         id_help.setOpenExternalLinks(True)
