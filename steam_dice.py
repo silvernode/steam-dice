@@ -9,7 +9,7 @@ import requests
 if os.environ.get("WAYLAND_DISPLAY"):
     os.environ.setdefault("QT_QPA_PLATFORM", "wayland")
 from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QPixmap, QFont, QIcon
 
 VERSION = "v0.1.0"
@@ -32,12 +32,15 @@ STEAM_ID = "76561198000382373"
 IMG_W = 460
 IMG_H = 215
 MARGIN = 20
+TOP_ROW_H = 46        # refresh button (28) + gap (4) + cooldown label (14)
 TITLE_H = 30
 STATUS_H = 20
 DICE_H = 100
 SPACING = 12
+REFRESH_COOLDOWN = 60  # seconds
 WIN_W = IMG_W + MARGIN * 2
-WIN_H = MARGIN + TITLE_H + SPACING + IMG_H + SPACING + STATUS_H + SPACING + DICE_H + MARGIN
+WIN_H = (MARGIN + TOP_ROW_H + SPACING + TITLE_H + SPACING
+         + IMG_H + SPACING + STATUS_H + SPACING + DICE_H + MARGIN)
 
 DICE_FACES = "⚀⚁⚂⚃⚄⚅"
 
@@ -56,6 +59,18 @@ DICE_STYLE = """
     QPushButton:hover { color: #ffffff; }
     QPushButton:pressed { color: #888; }
     QPushButton:disabled { color: #4a5a6a; }
+"""
+
+REFRESH_STYLE = """
+    QPushButton {
+        background: transparent;
+        border: none;
+        padding: 2px;
+        border-radius: 4px;
+    }
+    QPushButton:hover { background: rgba(255, 255, 255, 0.08); }
+    QPushButton:pressed { background: rgba(255, 255, 255, 0.04); }
+    QPushButton:disabled { opacity: 0.3; }
 """
 
 
@@ -101,6 +116,7 @@ class SteamDice(QMainWindow):
         super().__init__()
         self.games = []
         self.image_thread = None
+        self.cooldown_remaining = 0
 
         self.setWindowTitle("Steam Dice")
         self.setFixedSize(WIN_W, WIN_H)
@@ -113,6 +129,43 @@ class SteamDice(QMainWindow):
         layout.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
         layout.setContentsMargins(MARGIN, MARGIN, MARGIN, MARGIN)
         layout.setSpacing(SPACING)
+
+        # Top row: refresh button + cooldown label pinned to right
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.addStretch()
+
+        refresh_col = QVBoxLayout()
+        refresh_col.setSpacing(4)
+        refresh_col.setContentsMargins(0, 0, 0, 0)
+
+        self.refresh_btn = QPushButton()
+        self.refresh_btn.setIcon(QIcon.fromTheme("view-refresh"))
+        self.refresh_btn.setIconSize(self.refresh_btn.sizeHint())
+        self.refresh_btn.setFixedSize(28, 28)
+        self.refresh_btn.setStyleSheet(REFRESH_STYLE)
+        self.refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.refresh_btn.setToolTip("Refresh game library")
+        self.refresh_btn.setEnabled(False)
+        self.refresh_btn.clicked.connect(self._refresh)
+        refresh_col.addWidget(self.refresh_btn, alignment=Qt.AlignmentFlag.AlignRight)
+
+        self.cooldown_label = QLabel()
+        self.cooldown_label.setFixedHeight(14)
+        cooldown_font = QFont()
+        cooldown_font.setPointSize(8)
+        self.cooldown_label.setFont(cooldown_font)
+        self.cooldown_label.setStyleSheet("color: #4a5a6a;")
+        self.cooldown_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.cooldown_label.setVisible(False)
+        refresh_col.addWidget(self.cooldown_label)
+
+        top_row.addLayout(refresh_col)
+        layout.addLayout(top_row)
+
+        self._cooldown_timer = QTimer()
+        self._cooldown_timer.setInterval(1000)
+        self._cooldown_timer.timeout.connect(self._on_cooldown_tick)
 
         # Game title
         self.title_label = QLabel()
@@ -186,9 +239,30 @@ class SteamDice(QMainWindow):
         self.games = games
         self.status_label.setText(f"{len(games)} games — roll the dice!")
         self.dice_btn.setEnabled(True)
+        self.refresh_btn.setEnabled(True)
 
     def _on_library_error(self, msg):
         self.status_label.setText(f"Error loading library: {msg}")
+        self.refresh_btn.setEnabled(True)
+
+    def _refresh(self):
+        self.refresh_btn.setEnabled(False)
+        self.dice_btn.setEnabled(False)
+        self.status_label.setText("Refreshing library…")
+        self.cooldown_remaining = REFRESH_COOLDOWN
+        self.cooldown_label.setText(f"{self.cooldown_remaining}s")
+        self.cooldown_label.setVisible(True)
+        self._cooldown_timer.start()
+        self._fetch_library()
+
+    def _on_cooldown_tick(self):
+        self.cooldown_remaining -= 1
+        if self.cooldown_remaining <= 0:
+            self._cooldown_timer.stop()
+            self.cooldown_label.setVisible(False)
+            self.refresh_btn.setEnabled(True)
+        else:
+            self.cooldown_label.setText(f"{self.cooldown_remaining}s")
 
     def roll(self):
         if not self.games:
