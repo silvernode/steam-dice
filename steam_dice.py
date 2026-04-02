@@ -10,8 +10,9 @@ import requests
 # Run natively on Wayland if available, fall back to X11 otherwise
 if os.environ.get("WAYLAND_DISPLAY"):
     os.environ.setdefault("QT_QPA_PLATFORM", "wayland")
-from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QComboBox
-from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+                              QPushButton, QLabel, QComboBox, QDialog, QDialogButtonBox, QLineEdit)
+from PyQt6.QtCore import Qt, QSettings, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QPixmap, QFont, QIcon
 
 VERSION = "v0.1.0"
@@ -47,9 +48,6 @@ def _scan_installed_appids():
                 installed.add(int(m.group(1)))
     return installed
 
-
-STEAM_API_KEY = "A2B1B59F6F16FA3CD3107378AE737C3D"
-STEAM_ID = "76561198000382373"
 
 IMG_W = 460
 IMG_H = 215
@@ -128,11 +126,16 @@ class FetchLibraryThread(QThread):
     done = pyqtSignal(list)
     error = pyqtSignal(str)
 
+    def __init__(self, api_key, steam_id):
+        super().__init__()
+        self.api_key = api_key
+        self.steam_id = steam_id
+
     def run(self):
         try:
             url = (
                 "https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/"
-                f"?key={STEAM_API_KEY}&steamid={STEAM_ID}&include_appinfo=1&format=json"
+                f"?key={self.api_key}&steamid={self.steam_id}&include_appinfo=1&format=json"
             )
             r = requests.get(url, timeout=15)
             r.raise_for_status()
@@ -159,6 +162,114 @@ class FetchImageThread(QThread):
             self.done.emit(pixmap)
         except Exception:
             self.done.emit(QPixmap())
+
+
+DIALOG_STYLE = """
+    QDialog, QWidget { background-color: #1b2838; }
+    QLabel { color: #c6d4df; }
+    QLineEdit {
+        background-color: #2a3f5f;
+        color: #c6d4df;
+        border: 1px solid #3d5a7a;
+        border-radius: 4px;
+        padding: 4px 8px;
+    }
+    QLineEdit:focus { border-color: #5a8ab0; }
+    QPushButton {
+        background-color: #2a3f5f;
+        color: #c6d4df;
+        border: 1px solid #3d5a7a;
+        border-radius: 4px;
+        padding: 4px 14px;
+        min-width: 60px;
+    }
+    QPushButton:hover { background-color: #3d5a7a; }
+    QPushButton:pressed { background-color: #1e3050; }
+    a { color: #5a8ab0; }
+"""
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Steam Dice — Settings")
+        self.setModal(True)
+        self.setFixedWidth(440)
+        self.setStyleSheet(DIALOG_STYLE)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(6)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        # --- API Key ---
+        layout.addWidget(QLabel("<b>Steam API Key</b>"))
+
+        key_row = QHBoxLayout()
+        key_row.setSpacing(6)
+        settings = QSettings("butter", "steam-dice")
+        self.key_edit = QLineEdit(settings.value("api_key", ""))
+        self.key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.key_edit.setPlaceholderText("Paste your 32-character key here…")
+        key_row.addWidget(self.key_edit)
+
+        show_btn = QPushButton()
+        show_btn.setIcon(QIcon.fromTheme("password-show-on"))
+        show_btn.setFixedSize(30, 30)
+        show_btn.setCheckable(True)
+        show_btn.setToolTip("Show / hide key")
+        show_btn.toggled.connect(lambda on: self.key_edit.setEchoMode(
+            QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password
+        ))
+        key_row.addWidget(show_btn)
+        layout.addLayout(key_row)
+
+        key_help = QLabel(
+            'Get your free key at '
+            '<a href="https://steamcommunity.com/dev/apikey">steamcommunity.com/dev/apikey</a>.'
+            '<br>Log in with Steam, enter any domain name (e.g. <i>localhost</i>), and copy the key shown.'
+        )
+        key_help.setOpenExternalLinks(True)
+        key_help.setWordWrap(True)
+        key_help.setStyleSheet("color: #8f98a0; font-size: 9pt; padding-bottom: 10px;")
+        layout.addWidget(key_help)
+
+        # --- Steam ID ---
+        layout.addWidget(QLabel("<b>Steam ID (64-bit)</b>"))
+        self.id_edit = QLineEdit(settings.value("steam_id", ""))
+        self.id_edit.setPlaceholderText("e.g. 76561198000000000")
+        layout.addWidget(self.id_edit)
+
+        id_help = QLabel(
+            'Your 17-digit Steam ID. To find it: open your Steam profile in a browser — '
+            'the number in the URL (<i>steamcommunity.com/profiles/<b>XXXXXXXXXXXXXXXXX</b></i>) '
+            'is your ID.<br>'
+            'If your URL uses a custom name instead, look it up at '
+            '<a href="https://steamid.io">steamid.io</a>.'
+        )
+        id_help.setOpenExternalLinks(True)
+        id_help.setWordWrap(True)
+        id_help.setStyleSheet("color: #8f98a0; font-size: 9pt; padding-bottom: 10px;")
+        layout.addWidget(id_help)
+
+        # --- Buttons ---
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._save)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _save(self):
+        api_key = self.key_edit.text().strip()
+        steam_id = self.id_edit.text().strip()
+        if not api_key or not steam_id:
+            self.key_edit.setStyleSheet("border: 1px solid #a04040;" if not api_key else "")
+            self.id_edit.setStyleSheet("border: 1px solid #a04040;" if not steam_id else "")
+            return
+        settings = QSettings("butter", "steam-dice")
+        settings.setValue("api_key", api_key)
+        settings.setValue("steam_id", steam_id)
+        self.accept()
 
 
 class SteamDice(QMainWindow):
@@ -201,16 +312,30 @@ class SteamDice(QMainWindow):
         refresh_col.setSpacing(4)
         refresh_col.setContentsMargins(0, 0, 0, 0)
 
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(4)
+        btn_row.setContentsMargins(0, 0, 0, 0)
+
+        self.settings_btn = QPushButton()
+        self.settings_btn.setIcon(QIcon.fromTheme("configure"))
+        self.settings_btn.setFixedSize(28, 28)
+        self.settings_btn.setStyleSheet(REFRESH_STYLE)
+        self.settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.settings_btn.setToolTip("Settings")
+        self.settings_btn.clicked.connect(self._open_settings)
+        btn_row.addWidget(self.settings_btn)
+
         self.refresh_btn = QPushButton()
         self.refresh_btn.setIcon(QIcon.fromTheme("view-refresh"))
-        self.refresh_btn.setIconSize(self.refresh_btn.sizeHint())
         self.refresh_btn.setFixedSize(28, 28)
         self.refresh_btn.setStyleSheet(REFRESH_STYLE)
         self.refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.refresh_btn.setToolTip("Refresh game library")
         self.refresh_btn.setEnabled(False)
         self.refresh_btn.clicked.connect(self._refresh)
-        refresh_col.addWidget(self.refresh_btn, alignment=Qt.AlignmentFlag.AlignRight)
+        btn_row.addWidget(self.refresh_btn)
+
+        refresh_col.addLayout(btn_row)
 
         self.cooldown_label = QLabel()
         self.cooldown_label.setFixedHeight(14)
@@ -313,13 +438,32 @@ class SteamDice(QMainWindow):
 
         layout.addLayout(bottom_row)
 
+        # Auto-open settings on first launch if credentials are missing
+        s = QSettings("butter", "steam-dice")
+        if not s.value("api_key") or not s.value("steam_id"):
+            QTimer.singleShot(0, self._open_settings)
         self._fetch_library()
 
     def _fetch_library(self):
-        self.fetch_thread = FetchLibraryThread()
+        settings = QSettings("butter", "steam-dice")
+        api_key = settings.value("api_key", "")
+        steam_id = settings.value("steam_id", "")
+        if not api_key or not steam_id:
+            self.status_label.setText("No credentials — click ⚙ to configure.")
+            return
+        self.fetch_thread = FetchLibraryThread(api_key, steam_id)
         self.fetch_thread.done.connect(self._on_library_loaded)
         self.fetch_thread.error.connect(self._on_library_error)
         self.fetch_thread.start()
+
+    def _open_settings(self):
+        dlg = SettingsDialog(self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.status_label.setText("Loading library…")
+            self.dice_btn.setEnabled(False)
+            self.filter_combo.setEnabled(False)
+            self.refresh_btn.setEnabled(False)
+            self._fetch_library()
 
     def _on_library_loaded(self, games):
         self.all_games = games
