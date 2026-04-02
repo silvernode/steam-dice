@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+import glob
 import os
+import re
 import sys
 import random
 import subprocess
@@ -8,7 +10,7 @@ import requests
 # Run natively on Wayland if available, fall back to X11 otherwise
 if os.environ.get("WAYLAND_DISPLAY"):
     os.environ.setdefault("QT_QPA_PLATFORM", "wayland")
-from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel
+from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QComboBox
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QPixmap, QFont, QIcon
 
@@ -24,6 +26,26 @@ def _get_version():
         return f"{VERSION}-{short}"
     except Exception:
         return VERSION
+
+
+def _scan_installed_appids():
+    """Return a set of appids currently installed across all Steam library folders."""
+    steam_root = os.path.expanduser("~/.local/share/Steam")
+    library_paths = [os.path.join(steam_root, "steamapps")]
+    vdf_path = os.path.join(steam_root, "steamapps", "libraryfolders.vdf")
+    try:
+        with open(vdf_path) as f:
+            for path in re.findall(r'"path"\s+"([^"]+)"', f.read()):
+                library_paths.append(os.path.join(path, "steamapps"))
+    except Exception:
+        pass
+    installed = set()
+    for lib in library_paths:
+        for acf in glob.glob(os.path.join(lib, "appmanifest_*.acf")):
+            m = re.search(r"appmanifest_(\d+)\.acf", acf)
+            if m:
+                installed.add(int(m.group(1)))
+    return installed
 
 
 STEAM_API_KEY = "A2B1B59F6F16FA3CD3107378AE737C3D"
@@ -60,6 +82,33 @@ DICE_STYLE = """
     QPushButton:hover { color: #ffffff; }
     QPushButton:pressed { color: #888; }
     QPushButton:disabled { color: #4a5a6a; }
+"""
+
+COMBO_STYLE = """
+    QComboBox {
+        background-color: #2a3f5f;
+        color: #c6d4df;
+        border: 1px solid #3d5a7a;
+        border-radius: 4px;
+        padding: 2px 8px;
+        min-width: 115px;
+    }
+    QComboBox:hover { border-color: #5a8ab0; }
+    QComboBox:disabled { color: #4a5a6a; border-color: #2a3a50; }
+    QComboBox::drop-down { border: none; width: 20px; }
+    QComboBox::down-arrow {
+        border-left: 4px solid transparent;
+        border-right: 4px solid transparent;
+        border-top: 5px solid #c6d4df;
+        width: 0; height: 0;
+    }
+    QComboBox QAbstractItemView {
+        background-color: #2a3f5f;
+        color: #c6d4df;
+        selection-background-color: #3d6b9e;
+        border: 1px solid #3d5a7a;
+        outline: none;
+    }
 """
 
 REFRESH_STYLE = """
@@ -115,7 +164,9 @@ class FetchImageThread(QThread):
 class SteamDice(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.all_games = []
         self.games = []
+        self.installed_appids = set()
         self.image_thread = None
         self.cooldown_remaining = 0
         self.current_appid = None
@@ -132,9 +183,18 @@ class SteamDice(QMainWindow):
         layout.setContentsMargins(MARGIN, MARGIN, MARGIN, MARGIN)
         layout.setSpacing(SPACING)
 
-        # Top row: refresh button + cooldown label pinned to right
+        # Top row: filter dropdown (left) | stretch | refresh button (right)
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
+
+        self.filter_combo = QComboBox()
+        self.filter_combo.addItems(["All games", "Installed", "Not installed"])
+        self.filter_combo.setFixedHeight(28)
+        self.filter_combo.setStyleSheet(COMBO_STYLE)
+        self.filter_combo.setEnabled(False)
+        self.filter_combo.currentIndexChanged.connect(self._apply_filter)
+        top_row.addWidget(self.filter_combo, alignment=Qt.AlignmentFlag.AlignTop)
+
         top_row.addStretch()
 
         refresh_col = QVBoxLayout()
@@ -262,14 +322,30 @@ class SteamDice(QMainWindow):
         self.fetch_thread.start()
 
     def _on_library_loaded(self, games):
-        self.games = games
-        self.status_label.setText(f"{len(games)} games — roll the dice!")
-        self.dice_btn.setEnabled(True)
+        self.all_games = games
+        self.installed_appids = _scan_installed_appids()
+        self.filter_combo.setEnabled(True)
         self.refresh_btn.setEnabled(True)
+        self._apply_filter()
 
     def _on_library_error(self, msg):
         self.status_label.setText(f"Error loading library: {msg}")
         self.refresh_btn.setEnabled(True)
+
+    def _apply_filter(self):
+        idx = self.filter_combo.currentIndex()
+        if idx == 1:
+            self.games = [g for g in self.all_games if g["appid"] in self.installed_appids]
+        elif idx == 2:
+            self.games = [g for g in self.all_games if g["appid"] not in self.installed_appids]
+        else:
+            self.games = list(self.all_games)
+        count = len(self.games)
+        if count:
+            self.status_label.setText(f"{count} games — roll the dice!")
+        else:
+            self.status_label.setText("No games match this filter.")
+        self.dice_btn.setEnabled(bool(self.games))
 
     def _refresh(self):
         self.refresh_btn.setEnabled(False)
