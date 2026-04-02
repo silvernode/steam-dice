@@ -2,14 +2,29 @@
 import os
 import sys
 import random
+import subprocess
 import requests
 
 # Run natively on Wayland if available, fall back to X11 otherwise
 if os.environ.get("WAYLAND_DISPLAY"):
     os.environ.setdefault("QT_QPA_PLATFORM", "wayland")
-from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QPushButton, QLabel
+from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QPixmap, QFont
+
+VERSION = "v0.1.0"
+
+def _get_version():
+    try:
+        short = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+        return f"{VERSION}-{short}"
+    except Exception:
+        return VERSION
+
 
 STEAM_API_KEY = "A2B1B59F6F16FA3CD3107378AE737C3D"
 STEAM_ID = "76561198000382373"
@@ -129,7 +144,20 @@ class SteamDice(QMainWindow):
         self.status_label.setStyleSheet("color: #8f98a0;")
         layout.addWidget(self.status_label)
 
-        # Dice button
+        # Bottom row: version (left) | spacer | dice (center) | spacer (right)
+        bottom_row = QHBoxLayout()
+        bottom_row.setContentsMargins(0, 0, 0, 0)
+
+        version_label = QLabel(_get_version())
+        ver_font = QFont()
+        ver_font.setPointSize(8)
+        version_label.setFont(ver_font)
+        version_label.setStyleSheet("color: #4a5a6a;")
+        version_label.setFixedWidth(80)
+        bottom_row.addWidget(version_label, alignment=Qt.AlignmentFlag.AlignBottom)
+
+        bottom_row.addStretch()
+
         self.dice_btn = QPushButton("⚄")
         dice_font = QFont()
         dice_font.setPointSize(52)
@@ -139,7 +167,12 @@ class SteamDice(QMainWindow):
         self.dice_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.dice_btn.setEnabled(False)
         self.dice_btn.clicked.connect(self.roll)
-        layout.addWidget(self.dice_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
+        bottom_row.addWidget(self.dice_btn)
+
+        bottom_row.addStretch()
+        bottom_row.addSpacing(80)  # mirror version label width to keep dice centered
+
+        layout.addLayout(bottom_row)
 
         self._fetch_library()
 
