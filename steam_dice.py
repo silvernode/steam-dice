@@ -37,10 +37,11 @@ TITLE_H = 30
 STATUS_H = 20
 DICE_H = 100
 SPACING = 12
+PLAY_BTN_H = 34
 REFRESH_COOLDOWN = 60  # seconds
 WIN_W = IMG_W + MARGIN * 2
 WIN_H = (MARGIN + TOP_ROW_H + SPACING + TITLE_H + SPACING
-         + IMG_H + SPACING + STATUS_H + SPACING + DICE_H + MARGIN)
+         + IMG_H + SPACING + PLAY_BTN_H + SPACING + STATUS_H + SPACING + DICE_H + MARGIN)
 
 DICE_FACES = "⚀⚁⚂⚃⚄⚅"
 
@@ -117,6 +118,7 @@ class SteamDice(QMainWindow):
         self.games = []
         self.image_thread = None
         self.cooldown_remaining = 0
+        self.current_appid = None
 
         self.setWindowTitle("Steam Dice")
         self.setFixedSize(WIN_W, WIN_H)
@@ -186,6 +188,30 @@ class SteamDice(QMainWindow):
         self.image_label.setStyleSheet("color: #8f98a0;")
         self.image_label.setVisible(False)
         layout.addWidget(self.image_label)
+
+        # Play button
+        self.play_btn = QPushButton("  Play")
+        self.play_btn.setIcon(QIcon.fromTheme("media-playback-start"))
+        play_font = QFont()
+        play_font.setPointSize(11)
+        play_font.setBold(True)
+        self.play_btn.setFont(play_font)
+        self.play_btn.setFixedHeight(34)
+        self.play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.play_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4c6b22;
+                color: #c6d4df;
+                border: none;
+                border-radius: 4px;
+                padding: 0 16px;
+            }
+            QPushButton:hover { background-color: #5a7d27; }
+            QPushButton:pressed { background-color: #3d5620; }
+        """)
+        self.play_btn.setVisible(False)
+        self.play_btn.clicked.connect(self._launch_game)
+        layout.addWidget(self.play_btn)
 
         # Status / loading text
         self.status_label = QLabel("Loading library…")
@@ -269,6 +295,7 @@ class SteamDice(QMainWindow):
             return
 
         game = random.choice(self.games)
+        self.current_appid = game["appid"]
         self.dice_btn.setText(random.choice(DICE_FACES))
         self.dice_btn.setEnabled(False)
 
@@ -276,6 +303,7 @@ class SteamDice(QMainWindow):
         self.title_label.setVisible(True)
         self.image_label.setText("Loading…")
         self.image_label.setVisible(True)
+        self.play_btn.setVisible(False)
         self.status_label.setText("")
 
         self.image_thread = FetchImageThread(game["appid"])
@@ -284,6 +312,7 @@ class SteamDice(QMainWindow):
 
     def _on_image_loaded(self, pixmap):
         self.dice_btn.setEnabled(True)
+        self.play_btn.setVisible(True)
         if pixmap.isNull():
             self.image_label.setText("No image available")
         else:
@@ -294,6 +323,10 @@ class SteamDice(QMainWindow):
                     Qt.TransformationMode.SmoothTransformation,
                 )
             )
+
+    def _launch_game(self):
+        if self.current_appid is not None:
+            subprocess.Popen(["xdg-open", f"steam://rungameid/{self.current_appid}"])
 
 
 if __name__ == "__main__":
