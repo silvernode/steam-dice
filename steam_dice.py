@@ -262,9 +262,13 @@ class SettingsDialog(QDialog):
     def _save(self):
         api_key = self.key_edit.text().strip()
         steam_id = self.id_edit.text().strip()
+        self.key_edit.setStyleSheet("")
+        self.id_edit.setStyleSheet("")
         if not api_key or not steam_id:
-            self.key_edit.setStyleSheet("border: 1px solid #a04040;" if not api_key else "")
-            self.id_edit.setStyleSheet("border: 1px solid #a04040;" if not steam_id else "")
+            if not api_key:
+                self.key_edit.setStyleSheet("border: 1px solid #a04040;")
+            if not steam_id:
+                self.id_edit.setStyleSheet("border: 1px solid #a04040;")
             return
         settings = QSettings("butter", "steam-dice")
         settings.setValue("api_key", api_key)
@@ -442,7 +446,8 @@ class SteamDice(QMainWindow):
         s = QSettings("butter", "steam-dice")
         if not s.value("api_key") or not s.value("steam_id"):
             QTimer.singleShot(0, self._open_settings)
-        self._fetch_library()
+        else:
+            self._fetch_library()
 
     def _fetch_library(self):
         settings = QSettings("butter", "steam-dice")
@@ -451,6 +456,9 @@ class SteamDice(QMainWindow):
         if not api_key or not steam_id:
             self.status_label.setText("No credentials — click ⚙ to configure.")
             return
+        if hasattr(self, "fetch_thread") and self.fetch_thread.isRunning():
+            self.fetch_thread.done.disconnect()
+            self.fetch_thread.error.disconnect()
         self.fetch_thread = FetchLibraryThread(api_key, steam_id)
         self.fetch_thread.done.connect(self._on_library_loaded)
         self.fetch_thread.error.connect(self._on_library_error)
@@ -474,6 +482,8 @@ class SteamDice(QMainWindow):
 
     def _on_library_error(self, msg):
         self.status_label.setText(f"Error loading library: {msg}")
+        self._cooldown_timer.stop()
+        self.cooldown_label.setVisible(False)
         self.refresh_btn.setEnabled(True)
 
     def _apply_filter(self):
@@ -526,6 +536,8 @@ class SteamDice(QMainWindow):
         self.play_btn.setVisible(False)
         self.status_label.setText("")
 
+        if self.image_thread is not None:
+            self.image_thread.done.disconnect()
         self.image_thread = FetchImageThread(game["appid"])
         self.image_thread.done.connect(self._on_image_loaded)
         self.image_thread.start()
