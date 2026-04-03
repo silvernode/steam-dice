@@ -6,6 +6,7 @@ import sys
 import random
 import subprocess
 import requests
+import keyring
 
 # Run natively on Wayland if available, fall back to X11 otherwise
 if os.environ.get("WAYLAND_DISPLAY"):
@@ -142,7 +143,8 @@ class FetchLibraryThread(QThread):
             games = r.json()["response"].get("games", [])
             self.done.emit(games)
         except Exception as e:
-            self.error.emit(str(e))
+            msg = str(e).replace(self.api_key, "[REDACTED]")
+            self.error.emit(msg)
 
 
 class FetchImageThread(QThread):
@@ -207,7 +209,7 @@ class SettingsDialog(QDialog):
         key_row = QHBoxLayout()
         key_row.setSpacing(6)
         settings = QSettings("butter", "steam-dice")
-        self.key_edit = QLineEdit(settings.value("api_key", ""))
+        self.key_edit = QLineEdit(keyring.get_password("steam-dice", "api_key") or "")
         self.key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.key_edit.setPlaceholderText("Paste your 32-character key here…")
         key_row.addWidget(self.key_edit)
@@ -264,14 +266,17 @@ class SettingsDialog(QDialog):
         steam_id = self.id_edit.text().strip()
         self.key_edit.setStyleSheet("")
         self.id_edit.setStyleSheet("")
-        if not api_key or not steam_id:
-            if not api_key:
+        key_valid = bool(re.fullmatch(r"[0-9A-Fa-f]{32}", api_key))
+        id_valid = bool(re.fullmatch(r"\d{17}", steam_id))
+        if not key_valid or not id_valid:
+            if not key_valid:
                 self.key_edit.setStyleSheet("border: 1px solid #a04040;")
-            if not steam_id:
+            if not id_valid:
                 self.id_edit.setStyleSheet("border: 1px solid #a04040;")
             return
+        keyring.set_password("steam-dice", "api_key", api_key)
         settings = QSettings("butter", "steam-dice")
-        settings.setValue("api_key", api_key)
+        settings.remove("api_key")  # migrate away from plaintext storage
         settings.setValue("steam_id", steam_id)
         self.accept()
 
@@ -444,14 +449,14 @@ class SteamDice(QMainWindow):
 
         # Auto-open settings on first launch if credentials are missing
         s = QSettings("butter", "steam-dice")
-        if not s.value("api_key") or not s.value("steam_id"):
+        if not keyring.get_password("steam-dice", "api_key") or not s.value("steam_id"):
             QTimer.singleShot(0, self._open_settings)
         else:
             self._fetch_library()
 
     def _fetch_library(self):
         settings = QSettings("butter", "steam-dice")
-        api_key = settings.value("api_key", "")
+        api_key = keyring.get_password("steam-dice", "api_key") or ""
         steam_id = settings.value("steam_id", "")
         if not api_key or not steam_id:
             self.status_label.setText("No credentials — click ⚙ to configure.")
@@ -471,6 +476,10 @@ class SteamDice(QMainWindow):
             self.dice_btn.setEnabled(False)
             self.filter_combo.setEnabled(False)
             self.refresh_btn.setEnabled(False)
+            self.cooldown_remaining = REFRESH_COOLDOWN
+            self.cooldown_label.setText(f"{self.cooldown_remaining}s")
+            self.cooldown_label.setVisible(True)
+            self._cooldown_timer.start()
             self._fetch_library()
 
     def _on_library_loaded(self, games):
