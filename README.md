@@ -2,7 +2,7 @@
 
 A small desktop app that picks a random game from your Steam library and lets you launch it directly. Stop staring at your backlog — let the dice decide.
 
-![Steam Dice screenshot](screenshot.jpg)
+![Steam Dice screenshot](https://gitbutter.xyz/mollusk/steam-dice/raw/branch/main/screenshot.jpg)
 
 ## Features
 
