@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# makepkg build artifacts
+pkg/
+src/
+steam-dice/
+*.pkg.tar.zst
+*.pkg.tar.zst.sig

@@ -1,7 +1,7 @@
 # Maintainer: Mollusk <silvernode@gmail.com>
 pkgname=steam-dice-git
 _pkgname=steam-dice
-pkgver=r0.0000000
+pkgver=r17.be764eb
 pkgrel=1
 pkgdesc="A PyQt6 desktop app that picks a random game from your Steam library"
 arch=('any')
@@ -22,8 +22,10 @@ pkgver() {
 package() {
     cd "$_pkgname"
     install -Dm755 steam_dice.py "$pkgdir/usr/bin/steam-dice"
-    install -Dm644 steam-dice.desktop "$pkgdir/usr/share/applications/steam-dice.desktop"
-    install -Dm644 steam-dice.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/steam-dice.svg"
+    install -Dm644 io.github.silvernode.SteamDice.desktop \
+        "$pkgdir/usr/share/applications/io.github.silvernode.SteamDice.desktop"
+    install -Dm644 io.github.silvernode.SteamDice.svg \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/io.github.silvernode.SteamDice.svg"
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$_pkgname/LICENSE"
     install -Dm644 README.md "$pkgdir/usr/share/doc/$_pkgname/README.md"
 }

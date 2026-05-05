@@ -572,10 +572,13 @@ class SteamDice(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    app.setDesktopFileName("steam-dice")
-    icon = QIcon.fromTheme("steam-dice")
+    app.setDesktopFileName("io.github.silvernode.SteamDice")
+    icon = QIcon.fromTheme("io.github.silvernode.SteamDice")
     if icon.isNull():
-        local_icon = os.path.join(os.path.dirname(os.path.abspath(__file__)), "steam-dice.svg")
+        local_icon = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "io.github.silvernode.SteamDice.svg",
+        )
         if os.path.exists(local_icon):
             icon = QIcon(local_icon)
     app.setWindowIcon(icon)
