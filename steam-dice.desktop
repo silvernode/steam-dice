@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Steam Dice
+GenericName=Random Game Picker
+Comment=Pick a random game from your Steam library
+Exec=steam-dice
+Icon=steam-dice
+Terminal=false
+Categories=Game;
+Keywords=steam;dice;random;game;launcher;
+StartupNotify=true
+StartupWMClass=steam-dice
