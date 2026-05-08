@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import glob
+import json
 import os
 import re
 import sys
@@ -12,7 +13,8 @@ import keyring
 if os.environ.get("WAYLAND_DISPLAY"):
     os.environ.setdefault("QT_QPA_PLATFORM", "wayland")
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                              QPushButton, QLabel, QComboBox, QDialog, QDialogButtonBox, QLineEdit)
+                              QPushButton, QLabel, QComboBox, QDialog, QDialogButtonBox, QLineEdit,
+                              QMessageBox)
 from PyQt6.QtCore import Qt, QSettings, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QPixmap, QFont, QIcon
 
@@ -48,6 +50,92 @@ def _scan_installed_appids():
             if m:
                 installed.add(int(m.group(1)))
     return installed
+
+
+# Steam's stable numeric genre IDs. Cross-referenced with the appdetails API.
+# Unknown IDs (e.g. 34, 73, internal/deprecated) are silently dropped.
+STEAM_GENRE_NAMES = {
+    1: "Action", 2: "Strategy", 3: "RPG", 4: "Casual", 9: "Racing",
+    18: "Sports", 23: "Indie", 25: "Adventure", 28: "Simulation",
+    29: "Massively Multiplayer", 37: "Free To Play",
+    51: "Animation & Modeling", 52: "Audio Production",
+    53: "Design & Illustration", 54: "Education", 55: "Photo Editing",
+    56: "Software Training", 57: "Utilities", 58: "Video Production",
+    59: "Web Publishing", 60: "Game Development",
+    70: "Early Access",
+}
+
+APPINFO_PATHS = [
+    "~/.local/share/Steam/appcache/appinfo.vdf",
+    "~/.steam/steam/appcache/appinfo.vdf",
+    "~/.steam/root/appcache/appinfo.vdf",
+]
+
+
+def _load_genres_from_appinfo(owned_appids):
+    """Read genre data for owned games from Steam's local appinfo.vdf.
+    Returns {appid_str: [genre_names]} or None if unavailable."""
+    try:
+        from steam.utils.appcache import parse_appinfo
+    except ImportError:
+        return None
+    wanted = set(owned_appids)
+    for path in (os.path.expanduser(p) for p in APPINFO_PATHS):
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, "rb") as f:
+                _, apps_iter = parse_appinfo(f, mapper=dict)
+                result = {}
+                for app in apps_iter:
+                    appid = app.get("appid")
+                    if appid not in wanted:
+                        continue
+                    common = (app.get("data", {})
+                              .get("appinfo", {})
+                              .get("common", {}))
+                    raw = common.get("genres") or {}
+                    names = []
+                    if isinstance(raw, dict):
+                        for v in raw.values():
+                            try:
+                                gid = int(v)
+                            except (TypeError, ValueError):
+                                continue
+                            name = STEAM_GENRE_NAMES.get(gid)
+                            if name and name not in names:
+                                names.append(name)
+                    result[str(appid)] = names
+                return result
+        except Exception:
+            continue
+    return None
+
+
+def _genre_cache_path():
+    cache_dir = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    return os.path.join(cache_dir, "steam-dice", "genres.json")
+
+
+def _load_genre_cache():
+    try:
+        with open(_genre_cache_path()) as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_genre_cache(cache):
+    """Merge `cache` into the on-disk cache so concurrent writers don't shrink it."""
+    path = _genre_cache_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    merged = _load_genre_cache()
+    merged.update(cache)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(merged, f)
+    os.replace(tmp, path)
 
 
 IMG_W = 460
@@ -164,6 +252,74 @@ class FetchImageThread(QThread):
             self.done.emit(pixmap)
         except Exception:
             self.done.emit(QPixmap())
+
+
+class FetchGenresThread(QThread):
+    progress = pyqtSignal(int, int, dict)  # done, total, cache snapshot
+    finished_ok = pyqtSignal(dict)         # final cache
+
+    REQUEST_INTERVAL_MS = 2000  # ~30 req/min, well under Steam's ~200/5min cap
+    SAVE_EVERY = 10
+
+    def __init__(self, appids, existing_cache):
+        super().__init__()
+        self.appids = list(appids)
+        self.cache = dict(existing_cache)
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        total = len(self.appids)
+        for i, appid in enumerate(self.appids):
+            if self._stop:
+                break
+            try:
+                url = (
+                    "https://store.steampowered.com/api/appdetails"
+                    f"?appids={appid}&filters=genres"
+                )
+                r = requests.get(url, timeout=10)
+                if r.status_code == 429:
+                    self.msleep(60_000)
+                    continue
+                r.raise_for_status()
+                entry = r.json().get(str(appid), {})
+                if entry.get("success") and entry.get("data"):
+                    self.cache[str(appid)] = [
+                        g["description"] for g in entry["data"].get("genres", [])
+                    ]
+                else:
+                    self.cache[str(appid)] = []
+            except Exception:
+                pass  # leave unfetched; retry on next session
+
+            if (i + 1) % self.SAVE_EVERY == 0:
+                _save_genre_cache(self.cache)
+            self.progress.emit(i + 1, total, dict(self.cache))
+            self.msleep(self.REQUEST_INTERVAL_MS)
+
+        _save_genre_cache(self.cache)
+        self.finished_ok.emit(self.cache)
+
+
+class GenreComboBox(QComboBox):
+    """QComboBox that intercepts the dropdown popup until permission is granted."""
+    popup_blocked = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._allow_popup = False
+
+    def set_allow_popup(self, allow):
+        self._allow_popup = allow
+
+    def showPopup(self):
+        if not self._allow_popup:
+            self.popup_blocked.emit()
+            return
+        super().showPopup()
 
 
 DIALOG_STYLE = """
@@ -290,6 +446,8 @@ class SteamDice(QMainWindow):
         self.image_thread = None
         self.cooldown_remaining = 0
         self.current_appid = None
+        self.genre_cache = _load_genre_cache()
+        self.genres_thread = None
 
         self.setWindowTitle("Steam Dice")
         self.setFixedSize(WIN_W, WIN_H)
@@ -314,6 +472,34 @@ class SteamDice(QMainWindow):
         self.filter_combo.setEnabled(False)
         self.filter_combo.currentIndexChanged.connect(self._apply_filter)
         top_row.addWidget(self.filter_combo, alignment=Qt.AlignmentFlag.AlignTop)
+
+        # Genre filter (with progress sub-label for first-time fetch)
+        genre_col = QVBoxLayout()
+        genre_col.setSpacing(4)
+        genre_col.setContentsMargins(0, 0, 0, 0)
+
+        self.genre_combo = GenreComboBox()
+        self.genre_combo.addItem("All genres")
+        self.genre_combo.setFixedHeight(28)
+        self.genre_combo.setStyleSheet(COMBO_STYLE)
+        self.genre_combo.setEnabled(False)
+        self.genre_combo.currentIndexChanged.connect(self._apply_filter)
+        self.genre_combo.popup_blocked.connect(self._prompt_genre_fetch)
+        genre_col.addWidget(self.genre_combo)
+
+        self.genre_progress_label = QLabel()
+        self.genre_progress_label.setFixedHeight(14)
+        progress_font = QFont()
+        progress_font.setPointSize(8)
+        self.genre_progress_label.setFont(progress_font)
+        self.genre_progress_label.setStyleSheet("color: #4a5a6a;")
+        self.genre_progress_label.setVisible(False)
+        genre_col.addWidget(self.genre_progress_label)
+
+        top_row.addLayout(genre_col)
+        # When the cache already has data, allow the dropdown to open immediately.
+        if self.genre_cache:
+            self.genre_combo.set_allow_popup(True)
 
         top_row.addStretch()
 
@@ -486,6 +672,21 @@ class SteamDice(QMainWindow):
         self.all_games = games
         self.installed_appids = _scan_installed_appids()
         self.filter_combo.setEnabled(True)
+        self.genre_combo.setEnabled(True)
+
+        # Try Steam's local appinfo.vdf cache first — instant, no network.
+        owned_ids = {g["appid"] for g in games}
+        local_genres = _load_genres_from_appinfo(owned_ids)
+        if local_genres:
+            for aid, names in local_genres.items():
+                self.genre_cache.setdefault(aid, names)
+            try:
+                _save_genre_cache(self.genre_cache)
+            except OSError:
+                pass
+            self.genre_combo.set_allow_popup(True)
+
+        self._rebuild_genre_combo()
         self.refresh_btn.setEnabled(True)
         self._apply_filter()
 
@@ -498,17 +699,95 @@ class SteamDice(QMainWindow):
     def _apply_filter(self):
         idx = self.filter_combo.currentIndex()
         if idx == 1:
-            self.games = [g for g in self.all_games if g["appid"] in self.installed_appids]
+            games = [g for g in self.all_games if g["appid"] in self.installed_appids]
         elif idx == 2:
-            self.games = [g for g in self.all_games if g["appid"] not in self.installed_appids]
+            games = [g for g in self.all_games if g["appid"] not in self.installed_appids]
         else:
-            self.games = list(self.all_games)
+            games = list(self.all_games)
+
+        genre = self.genre_combo.currentData()
+        if genre:
+            games = [
+                g for g in games
+                if genre in self.genre_cache.get(str(g["appid"]), [])
+            ]
+
+        self.games = games
         count = len(self.games)
         if count:
             self.status_label.setText(f"{count} games — roll the dice!")
         else:
             self.status_label.setText("No games match this filter.")
         self.dice_btn.setEnabled(bool(self.games))
+
+    def _rebuild_genre_combo(self):
+        """Rebuild the genre dropdown from the current cache, preserving selection."""
+        current = self.genre_combo.currentData()
+        all_genres = sorted({
+            g for genres in self.genre_cache.values() for g in genres
+        })
+        self.genre_combo.blockSignals(True)
+        self.genre_combo.clear()
+        self.genre_combo.addItem("All genres", None)
+        for g in all_genres:
+            self.genre_combo.addItem(g, g)
+        if current:
+            idx = self.genre_combo.findData(current)
+            if idx >= 0:
+                self.genre_combo.setCurrentIndex(idx)
+        self.genre_combo.blockSignals(False)
+
+    def _prompt_genre_fetch(self):
+        if self.genres_thread and self.genres_thread.isRunning():
+            return
+        if not self.all_games:
+            QMessageBox.information(
+                self, "Steam Dice",
+                "Library is still loading — try again in a moment."
+            )
+            return
+        missing = [g["appid"] for g in self.all_games if str(g["appid"]) not in self.genre_cache]
+        if not missing:
+            self.genre_combo.set_allow_popup(True)
+            self.genre_combo.showPopup()
+            return
+
+        seconds = (len(missing) * FetchGenresThread.REQUEST_INTERVAL_MS) // 1000
+        minutes = seconds // 60
+        eta = f"~{minutes} min" if minutes >= 1 else f"~{seconds} sec"
+        reply = QMessageBox.question(
+            self, "Load genres from Steam?",
+            f"Genre filtering needs to fetch genre data for {len(missing)} games "
+            f"from Steam's store API.\n\n"
+            f"This takes {eta} (rate-limited to one request every "
+            f"{FetchGenresThread.REQUEST_INTERVAL_MS // 1000}s) and is cached "
+            f"afterward. The app stays usable while it runs.\n\nContinue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self.genres_thread = FetchGenresThread(missing, self.genre_cache)
+        self.genres_thread.progress.connect(self._on_genres_progress)
+        self.genres_thread.finished_ok.connect(self._on_genres_done)
+        self.genre_combo.set_allow_popup(True)
+        self.genre_progress_label.setVisible(True)
+        self.genre_progress_label.setText(f"0 / {len(missing)}")
+        self.genres_thread.start()
+
+    def _on_genres_progress(self, done, total, cache_snapshot):
+        self.genre_cache.update(cache_snapshot)
+        self.genre_progress_label.setText(f"{done} / {total}")
+        # Refresh the dropdown periodically as new genres are discovered.
+        if done % FetchGenresThread.SAVE_EVERY == 0:
+            self._rebuild_genre_combo()
+
+    def _on_genres_done(self, cache):
+        self.genre_cache.update(cache)
+        self.genre_progress_label.setVisible(False)
+        self._rebuild_genre_combo()
+        self._apply_filter()
 
     def _refresh(self):
         self.refresh_btn.setEnabled(False)
@@ -568,6 +847,12 @@ class SteamDice(QMainWindow):
     def _launch_game(self):
         if self.current_appid is not None:
             subprocess.Popen(["xdg-open", f"steam://rungameid/{self.current_appid}"])
+
+    def closeEvent(self, a0):
+        if self.genres_thread and self.genres_thread.isRunning():
+            self.genres_thread.stop()
+            self.genres_thread.wait(12000)  # cover in-flight 10s HTTP timeout + final save
+        super().closeEvent(a0)
 
 
 if __name__ == "__main__":
