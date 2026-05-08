@@ -8,6 +8,7 @@ arch=('any')
 url="https://github.com/silvernode/steam-dice"
 license=('GPL-2.0-only')
 depends=('python' 'python-pyqt6' 'python-requests' 'python-keyring' 'xdg-utils')
+optdepends=('python-steam: instant genre filter via Steam'\''s local appinfo.vdf cache (otherwise falls back to rate-limited Steam API)')
 makedepends=('git')
 provides=("$_pkgname")
 conflicts=("$_pkgname")
