@@ -552,61 +552,54 @@ class SteamDice(QMainWindow):
         # Top row: filter dropdown (left) | stretch | refresh button (right)
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(8)
 
+        COMBO_W = 115
+
+        def _combo_column(combo, sub_widget):
+            """Combo with a 14px sub-row underneath (progress label or spacer)
+            so all three filter columns share identical geometry."""
+            col = QVBoxLayout()
+            col.setSpacing(4)
+            col.setContentsMargins(0, 0, 0, 0)
+            combo.setFixedHeight(28)
+            combo.setFixedWidth(COMBO_W)
+            combo.setStyleSheet(COMBO_STYLE)
+            col.addWidget(combo)
+            sub_widget.setFixedHeight(14)
+            col.addWidget(sub_widget)
+            return col
+
+        # Install-status filter
         self.filter_combo = QComboBox()
         self.filter_combo.addItems(["All games", "Installed", "Not installed"])
-        self.filter_combo.setFixedHeight(28)
-        self.filter_combo.setStyleSheet(COMBO_STYLE)
         self.filter_combo.setEnabled(False)
         self.filter_combo.currentIndexChanged.connect(self._apply_filter)
-        top_row.addWidget(self.filter_combo, alignment=Qt.AlignmentFlag.AlignTop)
+        top_row.addLayout(_combo_column(self.filter_combo, QLabel()))
 
         # Genre filter (with progress sub-label for first-time fetch)
-        genre_col = QVBoxLayout()
-        genre_col.setSpacing(4)
-        genre_col.setContentsMargins(0, 0, 0, 0)
-
         self.genre_combo = LazyComboBox()
         self.genre_combo.addItem("All genres")
-        self.genre_combo.setFixedHeight(28)
-        self.genre_combo.setStyleSheet(COMBO_STYLE)
         self.genre_combo.setEnabled(False)
         self.genre_combo.currentIndexChanged.connect(self._apply_filter)
         self.genre_combo.popup_blocked.connect(self._prompt_genre_fetch)
-        genre_col.addWidget(self.genre_combo)
 
+        # Always visible (empty text when idle) so the column height stays the
+        # same as the filter and tag columns — keeps all three combos aligned.
         self.genre_progress_label = QLabel()
-        self.genre_progress_label.setFixedHeight(14)
         progress_font = QFont()
         progress_font.setPointSize(8)
         self.genre_progress_label.setFont(progress_font)
         self.genre_progress_label.setStyleSheet("color: #4a5a6a;")
-        self.genre_progress_label.setVisible(False)
-        genre_col.addWidget(self.genre_progress_label)
+        top_row.addLayout(_combo_column(self.genre_combo, self.genre_progress_label))
 
-        top_row.addLayout(genre_col)
-
-        # Tag filter (mirrors the genre column; uses store_tags from appinfo.vdf)
-        tag_col = QVBoxLayout()
-        tag_col.setSpacing(4)
-        tag_col.setContentsMargins(0, 0, 0, 0)
-
+        # Tag filter (uses store_tags from appinfo.vdf)
         self.tag_combo = LazyComboBox()
         self.tag_combo.addItem("All tags")
-        self.tag_combo.setFixedHeight(28)
-        self.tag_combo.setStyleSheet(COMBO_STYLE)
         self.tag_combo.setEnabled(False)
         self.tag_combo.currentIndexChanged.connect(self._apply_filter)
         self.tag_combo.popup_blocked.connect(self._prompt_tags_fetch)
-        tag_col.addWidget(self.tag_combo)
-
-        # Spacer to keep the tag combo vertically aligned with the genre combo
-        # despite the genre column's extra progress-label row.
-        tag_spacer = QLabel()
-        tag_spacer.setFixedHeight(14)
-        tag_col.addWidget(tag_spacer)
-
-        top_row.addLayout(tag_col)
+        top_row.addLayout(_combo_column(self.tag_combo, QLabel()))
 
         # When the cache already has data, allow the dropdowns to open immediately.
         if any(isinstance(e, dict) and e.get("genres") for e in self.taxonomy_cache.values()):
@@ -952,7 +945,6 @@ class SteamDice(QMainWindow):
         self.genres_thread.progress.connect(self._on_genres_progress)
         self.genres_thread.finished_ok.connect(self._on_genres_done)
         self.genre_combo.set_allow_popup(True)
-        self.genre_progress_label.setVisible(True)
         self.genre_progress_label.setText(f"0 / {len(missing)}")
         self.genres_thread.start()
 
@@ -1003,7 +995,7 @@ class SteamDice(QMainWindow):
 
     def _on_genres_done(self, cache):
         _merge_taxonomy_into(self.taxonomy_cache, cache)
-        self.genre_progress_label.setVisible(False)
+        self.genre_progress_label.setText("")
         self._rebuild_genre_combo()
         self._apply_filter()
 
