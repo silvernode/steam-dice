@@ -127,11 +127,14 @@ def _load_genre_cache():
 
 
 def _save_genre_cache(cache):
+    """Merge `cache` into the on-disk cache so concurrent writers don't shrink it."""
     path = _genre_cache_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    merged = _load_genre_cache()
+    merged.update(cache)
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
-        json.dump(cache, f)
+        json.dump(merged, f)
     os.replace(tmp, path)
 
 
@@ -774,14 +777,14 @@ class SteamDice(QMainWindow):
         self.genres_thread.start()
 
     def _on_genres_progress(self, done, total, cache_snapshot):
-        self.genre_cache = cache_snapshot
+        self.genre_cache.update(cache_snapshot)
         self.genre_progress_label.setText(f"{done} / {total}")
         # Refresh the dropdown periodically as new genres are discovered.
         if done % FetchGenresThread.SAVE_EVERY == 0:
             self._rebuild_genre_combo()
 
     def _on_genres_done(self, cache):
-        self.genre_cache = cache
+        self.genre_cache.update(cache)
         self.genre_progress_label.setVisible(False)
         self._rebuild_genre_combo()
         self._apply_filter()
