@@ -72,9 +72,10 @@ APPINFO_PATHS = [
 ]
 
 
-def _load_genres_from_appinfo(owned_appids):
-    """Read genre data for owned games from Steam's local appinfo.vdf.
-    Returns {appid_str: [genre_names]} or None if unavailable."""
+def _load_taxonomy_from_appinfo(owned_appids, tags_table):
+    """Read genre + store_tag data for owned games from Steam's local appinfo.vdf.
+    Returns {appid_str: {"genres": [...], "tags": [...]}} or None if unavailable.
+    `tags_table` is {tagid_str: name}; pass {} to skip tag translation."""
     try:
         from steam.utils.appcache import parse_appinfo
     except ImportError:
@@ -94,47 +95,101 @@ def _load_genres_from_appinfo(owned_appids):
                     common = (app.get("data", {})
                               .get("appinfo", {})
                               .get("common", {}))
-                    raw = common.get("genres") or {}
-                    names = []
-                    if isinstance(raw, dict):
-                        for v in raw.values():
+                    genres = []
+                    raw_g = common.get("genres") or {}
+                    if isinstance(raw_g, dict):
+                        for v in raw_g.values():
                             try:
                                 gid = int(v)
                             except (TypeError, ValueError):
                                 continue
                             name = STEAM_GENRE_NAMES.get(gid)
-                            if name and name not in names:
-                                names.append(name)
-                    result[str(appid)] = names
+                            if name and name not in genres:
+                                genres.append(name)
+                    tags = []
+                    raw_t = common.get("store_tags") or {}
+                    if isinstance(raw_t, dict):
+                        for v in raw_t.values():
+                            try:
+                                tid = int(v)
+                            except (TypeError, ValueError):
+                                continue
+                            name = tags_table.get(str(tid))
+                            if name and name not in tags:
+                                tags.append(name)
+                    result[str(appid)] = {"genres": genres, "tags": tags}
                 return result
         except Exception:
             continue
     return None
 
 
-def _genre_cache_path():
-    cache_dir = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
-    return os.path.join(cache_dir, "steam-dice", "genres.json")
+def _cache_dir():
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    return os.path.join(base, "steam-dice")
 
 
-def _load_genre_cache():
+def _taxonomy_cache_path():
+    return os.path.join(_cache_dir(), "taxonomy.json")
+
+
+def _tags_table_path():
+    return os.path.join(_cache_dir(), "tags.json")
+
+
+def _load_taxonomy_cache():
     try:
-        with open(_genre_cache_path()) as f:
+        with open(_taxonomy_cache_path()) as f:
             data = json.load(f)
             return data if isinstance(data, dict) else {}
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
 
 
-def _save_genre_cache(cache):
+def _merge_taxonomy_into(target, source):
+    """Merge {appid: {genres, tags}} entries; preserve non-empty fields per appid."""
+    for aid, entry in source.items():
+        if not isinstance(entry, dict):
+            continue
+        existing = target.get(aid)
+        merged = dict(existing) if isinstance(existing, dict) else {}
+        for k in ("genres", "tags"):
+            new_val = entry.get(k)
+            if new_val:
+                merged[k] = new_val
+            elif k not in merged:
+                merged[k] = []
+        target[aid] = merged
+
+
+def _save_taxonomy_cache(cache):
     """Merge `cache` into the on-disk cache so concurrent writers don't shrink it."""
-    path = _genre_cache_path()
+    path = _taxonomy_cache_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    merged = _load_genre_cache()
-    merged.update(cache)
+    merged = _load_taxonomy_cache()
+    _merge_taxonomy_into(merged, cache)
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         json.dump(merged, f)
+    os.replace(tmp, path)
+
+
+def _load_tags_table():
+    """{tagid_str: tag_name} for translating store_tag IDs to readable names."""
+    try:
+        with open(_tags_table_path()) as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_tags_table(table):
+    path = _tags_table_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(table, f)
     os.replace(tmp, path)
 
 
@@ -235,6 +290,34 @@ class FetchLibraryThread(QThread):
             self.error.emit(msg)
 
 
+class FetchTagsTableThread(QThread):
+    """One-shot fetch of Steam's full tag-id → name table."""
+    done = pyqtSignal(dict)
+    error = pyqtSignal(str)
+
+    def __init__(self, api_key):
+        super().__init__()
+        self.api_key = api_key
+
+    def run(self):
+        try:
+            url = (
+                "https://api.steampowered.com/IStoreService/GetTagList/v1/"
+                f"?key={self.api_key}&language=english"
+            )
+            r = requests.get(url, timeout=15)
+            r.raise_for_status()
+            tags = r.json().get("response", {}).get("tags", [])
+            table = {
+                str(t["tagid"]): t["name"]
+                for t in tags if "tagid" in t and "name" in t
+            }
+            self.done.emit(table)
+        except Exception as e:
+            msg = str(e).replace(self.api_key, "[REDACTED]")
+            self.error.emit(msg)
+
+
 class FetchImageThread(QThread):
     done = pyqtSignal(QPixmap)
 
@@ -286,25 +369,28 @@ class FetchGenresThread(QThread):
                     continue
                 r.raise_for_status()
                 entry = r.json().get(str(appid), {})
+                genres = []
                 if entry.get("success") and entry.get("data"):
-                    self.cache[str(appid)] = [
+                    genres = [
                         g["description"] for g in entry["data"].get("genres", [])
                     ]
-                else:
-                    self.cache[str(appid)] = []
+                # Preserve any tags the appinfo path may have already populated.
+                prev = self.cache.get(str(appid))
+                prev_tags = prev.get("tags", []) if isinstance(prev, dict) else []
+                self.cache[str(appid)] = {"genres": genres, "tags": prev_tags}
             except Exception:
                 pass  # leave unfetched; retry on next session
 
             if (i + 1) % self.SAVE_EVERY == 0:
-                _save_genre_cache(self.cache)
+                _save_taxonomy_cache(self.cache)
             self.progress.emit(i + 1, total, dict(self.cache))
             self.msleep(self.REQUEST_INTERVAL_MS)
 
-        _save_genre_cache(self.cache)
+        _save_taxonomy_cache(self.cache)
         self.finished_ok.emit(self.cache)
 
 
-class GenreComboBox(QComboBox):
+class LazyComboBox(QComboBox):
     """QComboBox that intercepts the dropdown popup until permission is granted."""
     popup_blocked = pyqtSignal()
 
@@ -446,8 +532,10 @@ class SteamDice(QMainWindow):
         self.image_thread = None
         self.cooldown_remaining = 0
         self.current_appid = None
-        self.genre_cache = _load_genre_cache()
+        self.taxonomy_cache = _load_taxonomy_cache()
+        self.tags_table = _load_tags_table()
         self.genres_thread = None
+        self.tags_table_thread = None
 
         self.setWindowTitle("Steam Dice")
         self.setFixedSize(WIN_W, WIN_H)
@@ -478,7 +566,7 @@ class SteamDice(QMainWindow):
         genre_col.setSpacing(4)
         genre_col.setContentsMargins(0, 0, 0, 0)
 
-        self.genre_combo = GenreComboBox()
+        self.genre_combo = LazyComboBox()
         self.genre_combo.addItem("All genres")
         self.genre_combo.setFixedHeight(28)
         self.genre_combo.setStyleSheet(COMBO_STYLE)
@@ -497,9 +585,34 @@ class SteamDice(QMainWindow):
         genre_col.addWidget(self.genre_progress_label)
 
         top_row.addLayout(genre_col)
-        # When the cache already has data, allow the dropdown to open immediately.
-        if self.genre_cache:
+
+        # Tag filter (mirrors the genre column; uses store_tags from appinfo.vdf)
+        tag_col = QVBoxLayout()
+        tag_col.setSpacing(4)
+        tag_col.setContentsMargins(0, 0, 0, 0)
+
+        self.tag_combo = LazyComboBox()
+        self.tag_combo.addItem("All tags")
+        self.tag_combo.setFixedHeight(28)
+        self.tag_combo.setStyleSheet(COMBO_STYLE)
+        self.tag_combo.setEnabled(False)
+        self.tag_combo.currentIndexChanged.connect(self._apply_filter)
+        self.tag_combo.popup_blocked.connect(self._prompt_tags_fetch)
+        tag_col.addWidget(self.tag_combo)
+
+        # Spacer to keep the tag combo vertically aligned with the genre combo
+        # despite the genre column's extra progress-label row.
+        tag_spacer = QLabel()
+        tag_spacer.setFixedHeight(14)
+        tag_col.addWidget(tag_spacer)
+
+        top_row.addLayout(tag_col)
+
+        # When the cache already has data, allow the dropdowns to open immediately.
+        if any(isinstance(e, dict) and e.get("genres") for e in self.taxonomy_cache.values()):
             self.genre_combo.set_allow_popup(True)
+        if any(isinstance(e, dict) and e.get("tags") for e in self.taxonomy_cache.values()):
+            self.tag_combo.set_allow_popup(True)
 
         top_row.addStretch()
 
@@ -673,21 +786,60 @@ class SteamDice(QMainWindow):
         self.installed_appids = _scan_installed_appids()
         self.filter_combo.setEnabled(True)
         self.genre_combo.setEnabled(True)
+        self.tag_combo.setEnabled(True)
 
         # Try Steam's local appinfo.vdf cache first — instant, no network.
-        owned_ids = {g["appid"] for g in games}
-        local_genres = _load_genres_from_appinfo(owned_ids)
-        if local_genres:
-            for aid, names in local_genres.items():
-                self.genre_cache.setdefault(aid, names)
-            try:
-                _save_genre_cache(self.genre_cache)
-            except OSError:
-                pass
-            self.genre_combo.set_allow_popup(True)
+        # Genres populate immediately even before the tag-id table is available;
+        # tags require a tags_table for translation, so they're empty if it's missing.
+        self._read_appinfo_into_cache()
 
         self._rebuild_genre_combo()
+        self._rebuild_tag_combo()
         self.refresh_btn.setEnabled(True)
+        self._apply_filter()
+
+        # Fetch the tag-id → name table once if we don't have it yet, then re-read
+        # appinfo so tag names land in the taxonomy cache.
+        if not self.tags_table:
+            self._fetch_tags_table()
+
+    def _read_appinfo_into_cache(self):
+        owned_ids = {g["appid"] for g in self.all_games}
+        local = _load_taxonomy_from_appinfo(owned_ids, self.tags_table)
+        if not local:
+            return
+        _merge_taxonomy_into(self.taxonomy_cache, local)
+        try:
+            _save_taxonomy_cache(self.taxonomy_cache)
+        except OSError:
+            pass
+        if any(e.get("genres") for e in local.values()):
+            self.genre_combo.set_allow_popup(True)
+        if any(e.get("tags") for e in local.values()):
+            self.tag_combo.set_allow_popup(True)
+
+    def _fetch_tags_table(self):
+        if self.tags_table_thread and self.tags_table_thread.isRunning():
+            return
+        api_key = keyring.get_password("steam-dice", "api_key") or ""
+        if not api_key:
+            return
+        self.tags_table_thread = FetchTagsTableThread(api_key)
+        self.tags_table_thread.done.connect(self._on_tags_table_loaded)
+        self.tags_table_thread.error.connect(lambda _msg: None)  # silent; tags are optional
+        self.tags_table_thread.start()
+
+    def _on_tags_table_loaded(self, table):
+        if not table:
+            return
+        self.tags_table = table
+        try:
+            _save_tags_table(table)
+        except OSError:
+            pass
+        # Re-read appinfo now that we can translate tag IDs.
+        self._read_appinfo_into_cache()
+        self._rebuild_tag_combo()
         self._apply_filter()
 
     def _on_library_error(self, msg):
@@ -709,7 +861,14 @@ class SteamDice(QMainWindow):
         if genre:
             games = [
                 g for g in games
-                if genre in self.genre_cache.get(str(g["appid"]), [])
+                if genre in self.taxonomy_cache.get(str(g["appid"]), {}).get("genres", [])
+            ]
+
+        tag = self.tag_combo.currentData()
+        if tag:
+            games = [
+                g for g in games
+                if tag in self.taxonomy_cache.get(str(g["appid"]), {}).get("tags", [])
             ]
 
         self.games = games
@@ -724,7 +883,9 @@ class SteamDice(QMainWindow):
         """Rebuild the genre dropdown from the current cache, preserving selection."""
         current = self.genre_combo.currentData()
         all_genres = sorted({
-            g for genres in self.genre_cache.values() for g in genres
+            g for entry in self.taxonomy_cache.values()
+            if isinstance(entry, dict)
+            for g in entry.get("genres", [])
         })
         self.genre_combo.blockSignals(True)
         self.genre_combo.clear()
@@ -737,6 +898,25 @@ class SteamDice(QMainWindow):
                 self.genre_combo.setCurrentIndex(idx)
         self.genre_combo.blockSignals(False)
 
+    def _rebuild_tag_combo(self):
+        """Rebuild the tag dropdown from the current cache, preserving selection."""
+        current = self.tag_combo.currentData()
+        all_tags = sorted({
+            t for entry in self.taxonomy_cache.values()
+            if isinstance(entry, dict)
+            for t in entry.get("tags", [])
+        })
+        self.tag_combo.blockSignals(True)
+        self.tag_combo.clear()
+        self.tag_combo.addItem("All tags", None)
+        for t in all_tags:
+            self.tag_combo.addItem(t, t)
+        if current:
+            idx = self.tag_combo.findData(current)
+            if idx >= 0:
+                self.tag_combo.setCurrentIndex(idx)
+        self.tag_combo.blockSignals(False)
+
     def _prompt_genre_fetch(self):
         if self.genres_thread and self.genres_thread.isRunning():
             return
@@ -746,7 +926,7 @@ class SteamDice(QMainWindow):
                 "Library is still loading — try again in a moment."
             )
             return
-        missing = [g["appid"] for g in self.all_games if str(g["appid"]) not in self.genre_cache]
+        missing = [g["appid"] for g in self.all_games if str(g["appid"]) not in self.taxonomy_cache]
         if not missing:
             self.genre_combo.set_allow_popup(True)
             self.genre_combo.showPopup()
@@ -768,7 +948,7 @@ class SteamDice(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        self.genres_thread = FetchGenresThread(missing, self.genre_cache)
+        self.genres_thread = FetchGenresThread(missing, self.taxonomy_cache)
         self.genres_thread.progress.connect(self._on_genres_progress)
         self.genres_thread.finished_ok.connect(self._on_genres_done)
         self.genre_combo.set_allow_popup(True)
@@ -776,15 +956,53 @@ class SteamDice(QMainWindow):
         self.genre_progress_label.setText(f"0 / {len(missing)}")
         self.genres_thread.start()
 
+    def _prompt_tags_fetch(self):
+        # The tag combo only has data when both the tag-id table AND appinfo.vdf
+        # are available. There's no API fallback for tags, so just explain the
+        # situation if we can't populate it.
+        try:
+            from steam.utils.appcache import parse_appinfo  # noqa: F401
+            has_steam = True
+        except ImportError:
+            has_steam = False
+
+        if not has_steam:
+            QMessageBox.information(
+                self, "Tag filtering unavailable",
+                "Tag filtering reads Steam's local appinfo.vdf cache via the "
+                "<i>python-steam</i> package, which isn't installed.<br><br>"
+                "Install it (e.g. <code>pacman -S python-steam</code>) and "
+                "restart Steam Dice to enable this filter."
+            )
+            return
+
+        if not self.tags_table:
+            if self.tags_table_thread and self.tags_table_thread.isRunning():
+                QMessageBox.information(
+                    self, "Steam Dice",
+                    "Loading tag list from Steam — try again in a moment."
+                )
+            else:
+                self._fetch_tags_table()
+            return
+
+        # Tags table is loaded but cache is empty — likely the appinfo.vdf path
+        # didn't exist when we tried earlier.
+        QMessageBox.information(
+            self, "Steam Dice",
+            "No tag data found in Steam's local cache. Launch Steam at least "
+            "once to populate appinfo.vdf, then refresh."
+        )
+
     def _on_genres_progress(self, done, total, cache_snapshot):
-        self.genre_cache.update(cache_snapshot)
+        _merge_taxonomy_into(self.taxonomy_cache, cache_snapshot)
         self.genre_progress_label.setText(f"{done} / {total}")
         # Refresh the dropdown periodically as new genres are discovered.
         if done % FetchGenresThread.SAVE_EVERY == 0:
             self._rebuild_genre_combo()
 
     def _on_genres_done(self, cache):
-        self.genre_cache.update(cache)
+        _merge_taxonomy_into(self.taxonomy_cache, cache)
         self.genre_progress_label.setVisible(False)
         self._rebuild_genre_combo()
         self._apply_filter()
@@ -852,6 +1070,8 @@ class SteamDice(QMainWindow):
         if self.genres_thread and self.genres_thread.isRunning():
             self.genres_thread.stop()
             self.genres_thread.wait(12000)  # cover in-flight 10s HTTP timeout + final save
+        if self.tags_table_thread and self.tags_table_thread.isRunning():
+            self.tags_table_thread.wait(15000)
         super().closeEvent(a0)
 
 
