@@ -1,7 +1,7 @@
 # Maintainer: Mollusk <silvernode@gmail.com>
 pkgname=steam-dice-git
 _pkgname=steam-dice
-pkgver=r17.be764eb
+pkgver=r30.4ba3aa0
 pkgrel=1
 pkgdesc="A PyQt6 desktop app that picks a random game from your Steam library"
 arch=('any')
