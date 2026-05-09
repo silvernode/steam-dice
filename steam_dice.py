@@ -14,8 +14,8 @@ if os.environ.get("WAYLAND_DISPLAY"):
     os.environ.setdefault("QT_QPA_PLATFORM", "wayland")
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                               QPushButton, QLabel, QComboBox, QDialog, QDialogButtonBox, QLineEdit,
-                              QMessageBox)
-from PyQt6.QtCore import Qt, QSettings, QThread, QTimer, pyqtSignal
+                              QMessageBox, QFrame, QListWidget, QListWidgetItem)
+from PyQt6.QtCore import Qt, QPoint, QSettings, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QPixmap, QFont, QIcon
 
 VERSION = "v0.1.0"
@@ -193,6 +193,58 @@ def _save_tags_table(table):
     os.replace(tmp, path)
 
 
+def _friends_cache_path():
+    return os.path.join(_cache_dir(), "friends.json")
+
+
+def _friend_games_dir():
+    return os.path.join(_cache_dir(), "friend_games")
+
+
+def _friend_games_path(steamid):
+    return os.path.join(_friend_games_dir(), f"{steamid}.json")
+
+
+def _load_friends_cache():
+    """{steamid_str: {"name": "..."}}"""
+    try:
+        with open(_friends_cache_path()) as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_friends_cache(friends):
+    path = _friends_cache_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(friends, f)
+    os.replace(tmp, path)
+
+
+def _load_friend_games(steamid):
+    """Returns set of appids the friend owns, or None if no cache file exists.
+    Empty set means we successfully fetched but the friend's library was empty
+    or private — distinct from None."""
+    try:
+        with open(_friend_games_path(steamid)) as f:
+            data = json.load(f)
+            return set(data) if isinstance(data, list) else None
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+
+
+def _save_friend_games(steamid, appids):
+    os.makedirs(_friend_games_dir(), exist_ok=True)
+    path = _friend_games_path(steamid)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(sorted(appids), f)
+    os.replace(tmp, path)
+
+
 IMG_W = 460
 IMG_H = 215
 MARGIN = 20
@@ -203,7 +255,9 @@ DICE_H = 100
 SPACING = 12
 PLAY_BTN_H = 34
 REFRESH_COOLDOWN = 60  # seconds
-WIN_W = IMG_W + MARGIN * 2
+# Window is ~40px wider than image+margin to fit a fourth control (Friends) in
+# the top filter row alongside install/genre/tag combos.
+WIN_W = IMG_W + MARGIN * 2 + 40
 WIN_H = (MARGIN + TOP_ROW_H + SPACING + TITLE_H + SPACING
          + IMG_H + SPACING + PLAY_BTN_H + SPACING + STATUS_H + SPACING + DICE_H + MARGIN)
 
@@ -233,7 +287,7 @@ COMBO_STYLE = """
         border: 1px solid #3d5a7a;
         border-radius: 4px;
         padding: 2px 8px;
-        min-width: 115px;
+        min-width: 95px;
     }
     QComboBox:hover { border-color: #5a8ab0; }
     QComboBox:disabled { color: #4a5a6a; border-color: #2a3a50; }
@@ -251,6 +305,48 @@ COMBO_STYLE = """
         border: 1px solid #3d5a7a;
         outline: none;
     }
+"""
+
+FRIENDS_BTN_STYLE = """
+    QPushButton {
+        background-color: #2a3f5f;
+        color: #c6d4df;
+        border: 1px solid #3d5a7a;
+        border-radius: 4px;
+        padding: 2px 8px;
+        text-align: left;
+        min-width: 95px;
+    }
+    QPushButton:hover { border-color: #5a8ab0; }
+    QPushButton:disabled { color: #4a5a6a; border-color: #2a3a50; }
+"""
+
+FRIENDS_POPUP_STYLE = """
+    QFrame#FriendsPopup {
+        background-color: #1b2838;
+        border: 1px solid #3d5a7a;
+        border-radius: 4px;
+    }
+    QFrame#FriendsPopup QLabel { color: #8f98a0; }
+    QFrame#FriendsPopup QPushButton {
+        background-color: #2a3f5f;
+        color: #c6d4df;
+        border: 1px solid #3d5a7a;
+        border-radius: 4px;
+        padding: 2px 4px;
+    }
+    QFrame#FriendsPopup QPushButton:hover { background-color: #3d5a7a; }
+    QFrame#FriendsPopup QListWidget {
+        background-color: #2a3f5f;
+        color: #c6d4df;
+        border: 1px solid #3d5a7a;
+        border-radius: 3px;
+        outline: none;
+        padding: 2px;
+    }
+    QFrame#FriendsPopup QListWidget::item { padding: 3px 4px; }
+    QFrame#FriendsPopup QListWidget::item:selected,
+    QFrame#FriendsPopup QListWidget::item:hover { background-color: #3d6b9e; }
 """
 
 REFRESH_STYLE = """
@@ -390,6 +486,86 @@ class FetchGenresThread(QThread):
         self.finished_ok.emit(self.cache)
 
 
+class FetchFriendsThread(QThread):
+    """Fetch friend list and resolve display names via GetPlayerSummaries."""
+    done = pyqtSignal(dict)  # {steamid_str: {"name": "..."}}
+    error = pyqtSignal(str)
+
+    def __init__(self, api_key, steam_id):
+        super().__init__()
+        self.api_key = api_key
+        self.steam_id = steam_id
+
+    def run(self):
+        try:
+            url = (
+                "https://api.steampowered.com/ISteamUser/GetFriendList/v1/"
+                f"?key={self.api_key}&steamid={self.steam_id}&relationship=friend"
+            )
+            r = requests.get(url, timeout=15)
+            r.raise_for_status()
+            ids = [
+                f["steamid"]
+                for f in r.json().get("friendslist", {}).get("friends", [])
+            ]
+            result = {}
+            for i in range(0, len(ids), 100):
+                batch = ids[i:i + 100]
+                url = (
+                    "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/"
+                    f"?key={self.api_key}&steamids={','.join(batch)}"
+                )
+                r = requests.get(url, timeout=15)
+                r.raise_for_status()
+                for p in r.json().get("response", {}).get("players", []):
+                    sid = p.get("steamid")
+                    if sid:
+                        result[sid] = {"name": p.get("personaname", "Unknown")}
+            self.done.emit(result)
+        except Exception as e:
+            msg = str(e).replace(self.api_key, "[REDACTED]")
+            self.error.emit(msg)
+
+
+class FetchFriendGamesThread(QThread):
+    """Fetch a batch of friends' owned games sequentially."""
+    progress = pyqtSignal(str, list)   # steamid, list of appids
+    error = pyqtSignal(str, str)       # steamid, error message
+    finished_ok = pyqtSignal()
+
+    REQUEST_INTERVAL_MS = 500
+
+    def __init__(self, api_key, steam_ids):
+        super().__init__()
+        self.api_key = api_key
+        self.steam_ids = list(steam_ids)
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        for sid in self.steam_ids:
+            if self._stop:
+                break
+            try:
+                url = (
+                    "https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/"
+                    f"?key={self.api_key}&steamid={sid}&format=json"
+                )
+                r = requests.get(url, timeout=15)
+                r.raise_for_status()
+                games = r.json().get("response", {}).get("games", [])
+                appids = [g["appid"] for g in games]
+                _save_friend_games(sid, appids)
+                self.progress.emit(sid, appids)
+            except Exception as e:
+                msg = str(e).replace(self.api_key, "[REDACTED]")
+                self.error.emit(sid, msg)
+            self.msleep(self.REQUEST_INTERVAL_MS)
+        self.finished_ok.emit()
+
+
 class LazyComboBox(QComboBox):
     """QComboBox that intercepts the dropdown popup until permission is granted."""
     popup_blocked = pyqtSignal()
@@ -406,6 +582,143 @@ class LazyComboBox(QComboBox):
             self.popup_blocked.emit()
             return
         super().showPopup()
+
+
+class FriendsPopup(QFrame):
+    """Borderless popup with a checkable friend list. Auto-closes on outside click."""
+    selection_changed = pyqtSignal(set)
+    refresh_requested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.WindowType.Popup)
+        self.setObjectName("FriendsPopup")
+        self.setStyleSheet(FRIENDS_POPUP_STYLE)
+        self.setFixedWidth(240)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+
+        header = QHBoxLayout()
+        header.setSpacing(4)
+        header.setContentsMargins(0, 0, 0, 0)
+        self.status_label = QLabel("")
+        status_font = QFont()
+        status_font.setPointSize(8)
+        self.status_label.setFont(status_font)
+        header.addWidget(self.status_label, 1)
+        self.refresh_btn = QPushButton()
+        self.refresh_btn.setIcon(QIcon.fromTheme("view-refresh"))
+        self.refresh_btn.setFixedSize(22, 22)
+        self.refresh_btn.setToolTip("Refresh friend list from Steam")
+        self.refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.refresh_btn.clicked.connect(self.refresh_requested)
+        header.addWidget(self.refresh_btn)
+        layout.addLayout(header)
+
+        self.list_widget = QListWidget()
+        self.list_widget.setMinimumHeight(180)
+        self.list_widget.setMaximumHeight(360)
+        self.list_widget.itemChanged.connect(self._on_item_changed)
+        layout.addWidget(self.list_widget)
+
+        self._suppress = False
+
+    def populate(self, friends, selected_ids, friend_status):
+        """friends: {sid: {"name": ...}}; friend_status: {sid: "loading"|"empty"|"error"|...}"""
+        self._suppress = True
+        self.list_widget.clear()
+        if friends:
+            self.status_label.setText(f"{len(friends)} friend(s)")
+        for sid, info in sorted(friends.items(), key=lambda kv: kv[1]["name"].lower()):
+            label = info["name"]
+            status = friend_status.get(sid)
+            if status == "loading":
+                label += "  (loading…)"
+            elif status == "empty":
+                label += "  (private / 0 games)"
+            elif status == "error":
+                label += "  (error)"
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, sid)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.CheckState.Checked if sid in selected_ids else Qt.CheckState.Unchecked
+            )
+            self.list_widget.addItem(item)
+        self._suppress = False
+
+    def set_status(self, text):
+        self.status_label.setText(text)
+
+    def _on_item_changed(self, _item):
+        if self._suppress:
+            return
+        selected = set()
+        for i in range(self.list_widget.count()):
+            it = self.list_widget.item(i)
+            if it is None:
+                continue
+            if it.checkState() == Qt.CheckState.Checked:
+                selected.add(it.data(Qt.ItemDataRole.UserRole))
+        self.selection_changed.emit(selected)
+
+
+class FriendsButton(QPushButton):
+    """Combo-styled button that opens a checkable friend list popup."""
+    selection_changed = pyqtSignal(set)
+    refresh_requested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet(FRIENDS_BTN_STYLE)
+        self.popup = FriendsPopup(self)
+        self.popup.selection_changed.connect(self._on_selection_changed)
+        self.popup.refresh_requested.connect(self.refresh_requested)
+        self._friends = {}
+        self._selected = set()
+        self._friend_status = {}
+        self._update_label()
+
+    def show_popup(self):
+        pos = self.mapToGlobal(QPoint(0, self.height()))
+        self.popup.move(pos)
+        self.popup.show()
+
+    def populate(self, friends, friend_status):
+        self._friends = friends
+        # Drop any selected sid that disappeared from the friend list.
+        self._selected = {sid for sid in self._selected if sid in friends}
+        self._friend_status = friend_status
+        self.popup.populate(friends, self._selected, friend_status)
+        self._update_label()
+
+    def update_status(self, friend_status):
+        self._friend_status = friend_status
+        self.popup.populate(self._friends, self._selected, friend_status)
+
+    def set_status(self, msg):
+        self.popup.set_status(msg)
+
+    def selected(self):
+        return set(self._selected)
+
+    def clear(self):
+        self._friends = {}
+        self._selected = set()
+        self._friend_status = {}
+        self.popup.populate({}, set(), {})
+        self.popup.set_status("")
+        self._update_label()
+
+    def _on_selection_changed(self, selected):
+        self._selected = selected
+        self._update_label()
+        self.selection_changed.emit(selected)
+
+    def _update_label(self):
+        n = len(self._selected)
+        self.setText(f"Friends ({n}) ▾" if n else "Friends ▾")
 
 
 DIALOG_STYLE = """
@@ -537,6 +850,21 @@ class SteamDice(QMainWindow):
         self.genres_thread = None
         self.tags_table_thread = None
 
+        # Friends filter state. Friend list comes from disk; per-friend libraries
+        # populate lazily into self.friend_games as the user toggles them on.
+        self.friends = _load_friends_cache()  # {sid: {"name": ...}}
+        self.selected_friends = set()
+        self.friend_games = {}                # {sid: set(appids)}
+        self.friend_status = {}               # {sid: "loading"|"empty"|"error"}
+        self.friends_thread = None
+        self.friend_games_thread = None
+        for sid in self.friends:
+            cached = _load_friend_games(sid)
+            if cached is not None:
+                self.friend_games[sid] = cached
+                if not cached:
+                    self.friend_status[sid] = "empty"
+
         self.setWindowTitle("Steam Dice")
         self.setFixedSize(WIN_W, WIN_H)
         self.setStyleSheet(STYLE)
@@ -554,18 +882,20 @@ class SteamDice(QMainWindow):
         top_row.setContentsMargins(0, 0, 0, 0)
         top_row.setSpacing(8)
 
-        COMBO_W = 115
+        COMBO_W = 100
 
-        def _combo_column(combo, sub_widget):
-            """Combo with a 14px sub-row underneath (progress label or spacer)
-            so all three filter columns share identical geometry."""
+        def _combo_column(widget, sub_widget):
+            """Top-row control with a 14px sub-row underneath so all four filter
+            columns share identical geometry. Combo widgets get COMBO_STYLE;
+            other widgets are expected to set their own style."""
             col = QVBoxLayout()
             col.setSpacing(4)
             col.setContentsMargins(0, 0, 0, 0)
-            combo.setFixedHeight(28)
-            combo.setFixedWidth(COMBO_W)
-            combo.setStyleSheet(COMBO_STYLE)
-            col.addWidget(combo)
+            widget.setFixedHeight(28)
+            widget.setFixedWidth(COMBO_W)
+            if isinstance(widget, QComboBox):
+                widget.setStyleSheet(COMBO_STYLE)
+            col.addWidget(widget)
             sub_widget.setFixedHeight(14)
             col.addWidget(sub_widget)
             return col
@@ -600,6 +930,18 @@ class SteamDice(QMainWindow):
         self.tag_combo.currentIndexChanged.connect(self._apply_filter)
         self.tag_combo.popup_blocked.connect(self._prompt_tags_fetch)
         top_row.addLayout(_combo_column(self.tag_combo, QLabel()))
+
+        # Friends filter (multi-select via checklist popup). Intersects the user's
+        # library with each selected friend's owned-game set so only games
+        # everyone owns survive.
+        self.friends_btn = FriendsButton()
+        self.friends_btn.setEnabled(False)
+        self.friends_btn.clicked.connect(self._handle_friends_open)
+        self.friends_btn.selection_changed.connect(self._on_friends_selection_changed)
+        self.friends_btn.refresh_requested.connect(self._refresh_friends_list)
+        if self.friends:
+            self.friends_btn.populate(self.friends, self.friend_status)
+        top_row.addLayout(_combo_column(self.friends_btn, QLabel()))
 
         # When the cache already has data, allow the dropdowns to open immediately.
         if any(isinstance(e, dict) and e.get("genres") for e in self.taxonomy_cache.values()):
@@ -762,8 +1104,18 @@ class SteamDice(QMainWindow):
         self.fetch_thread.start()
 
     def _open_settings(self):
+        old_steam_id = QSettings("butter", "steam-dice").value("steam_id", "")
         dlg = SettingsDialog(self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
+            new_steam_id = QSettings("butter", "steam-dice").value("steam_id", "")
+            if old_steam_id and new_steam_id != old_steam_id:
+                # Different account — friend list belongs to the previous user.
+                # Clear in-memory state; the next click on Friends will re-fetch.
+                self.friends = {}
+                self.selected_friends = set()
+                self.friend_games = {}
+                self.friend_status = {}
+                self.friends_btn.clear()
             self.status_label.setText("Loading library…")
             self.dice_btn.setEnabled(False)
             self.filter_combo.setEnabled(False)
@@ -780,6 +1132,7 @@ class SteamDice(QMainWindow):
         self.filter_combo.setEnabled(True)
         self.genre_combo.setEnabled(True)
         self.tag_combo.setEnabled(True)
+        self.friends_btn.setEnabled(True)
 
         # Try Steam's local appinfo.vdf cache first — instant, no network.
         # Genres populate immediately even before the tag-id table is available;
@@ -864,7 +1217,26 @@ class SteamDice(QMainWindow):
                 if tag in self.taxonomy_cache.get(str(g["appid"]), {}).get("tags", [])
             ]
 
+        # Friend filter: intersection — keep only games every selected friend
+        # also owns. Friends whose libraries haven't loaded yet are reported
+        # via the status line and the dice stays disabled until they arrive.
+        pending = []
+        for sid in self.selected_friends:
+            owned = self.friend_games.get(sid)
+            if owned is None:
+                pending.append(self.friends.get(sid, {}).get("name", sid))
+                continue
+            games = [g for g in games if g["appid"] in owned]
+
         self.games = games
+        if pending:
+            shown = ", ".join(pending[:3])
+            if len(pending) > 3:
+                shown += f" +{len(pending) - 3}"
+            self.status_label.setText(f"Loading {shown}'s library…")
+            self.dice_btn.setEnabled(False)
+            return
+
         count = len(self.games)
         if count:
             self.status_label.setText(f"{count} games — roll the dice!")
@@ -999,6 +1371,115 @@ class SteamDice(QMainWindow):
         self._rebuild_genre_combo()
         self._apply_filter()
 
+    def _handle_friends_open(self):
+        """Friends button click: open the popup, fetching the friend list first
+        if we've never loaded it for this account."""
+        api_key = keyring.get_password("steam-dice", "api_key") or ""
+        steam_id = QSettings("butter", "steam-dice").value("steam_id", "")
+        if not api_key or not steam_id:
+            QMessageBox.information(
+                self, "Steam Dice",
+                "Configure your Steam API key and ID first (⚙)."
+            )
+            return
+        if self.friends:
+            self.friends_btn.show_popup()
+            return
+        if self.friends_thread and self.friends_thread.isRunning():
+            self.friends_btn.show_popup()
+            return
+        reply = QMessageBox.question(
+            self, "Load friends from Steam?",
+            "Load your Steam friend list to enable friend-based filtering?\n\n"
+            "Names are fetched once and cached. Each friend's library is "
+            "loaded on demand the first time you check them.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self.friends_btn.set_status("Loading friend list…")
+        self.friends_btn.show_popup()
+        self._start_friends_fetch(api_key, steam_id)
+
+    def _refresh_friends_list(self):
+        """Popup's refresh button: re-pull friend list + names from Steam."""
+        api_key = keyring.get_password("steam-dice", "api_key") or ""
+        steam_id = QSettings("butter", "steam-dice").value("steam_id", "")
+        if not api_key or not steam_id:
+            return
+        if self.friends_thread and self.friends_thread.isRunning():
+            return
+        self.friends_btn.set_status("Refreshing friend list…")
+        self._start_friends_fetch(api_key, steam_id)
+
+    def _start_friends_fetch(self, api_key, steam_id):
+        self.friends_thread = FetchFriendsThread(api_key, steam_id)
+        self.friends_thread.done.connect(self._on_friends_loaded)
+        self.friends_thread.error.connect(self._on_friends_error)
+        self.friends_thread.start()
+
+    def _on_friends_loaded(self, friends):
+        if not friends:
+            self.friends_btn.set_status("No friends found (profile may be private).")
+            return
+        self.friends = friends
+        try:
+            _save_friends_cache(friends)
+        except OSError:
+            pass
+        # Carry over any per-friend status we already have from disk; mark new
+        # friends as "no cache yet" by leaving them out of friend_status.
+        for sid in friends:
+            cached = _load_friend_games(sid)
+            if cached is not None and sid not in self.friend_games:
+                self.friend_games[sid] = cached
+                if not cached:
+                    self.friend_status[sid] = "empty"
+        self.friends_btn.populate(friends, self.friend_status)
+
+    def _on_friends_error(self, msg):
+        self.friends_btn.set_status(f"Error: {msg}")
+
+    def _on_friends_selection_changed(self, selected):
+        self.selected_friends = selected
+        # Kick off library fetches for any selected friend whose games we don't
+        # have cached and aren't already loading.
+        to_fetch = [
+            sid for sid in selected
+            if sid not in self.friend_games and self.friend_status.get(sid) != "loading"
+        ]
+        if to_fetch:
+            for sid in to_fetch:
+                self.friend_status[sid] = "loading"
+            self.friends_btn.update_status(self.friend_status)
+            self._start_friend_games_fetch(to_fetch)
+        self._apply_filter()
+
+    def _start_friend_games_fetch(self, steam_ids):
+        api_key = keyring.get_password("steam-dice", "api_key") or ""
+        if not api_key:
+            return
+        thread = FetchFriendGamesThread(api_key, steam_ids)
+        thread.progress.connect(self._on_friend_games_loaded)
+        thread.error.connect(self._on_friend_games_error)
+        # Keep a reference so it isn't GC'd; we don't need to coordinate
+        # multiple in-flight batches since each batch only writes its own keys.
+        self.friend_games_thread = thread
+        thread.start()
+
+    def _on_friend_games_loaded(self, sid, appids):
+        appid_set = set(appids)
+        self.friend_games[sid] = appid_set
+        self.friend_status[sid] = "empty" if not appid_set else "loaded"
+        self.friends_btn.update_status(self.friend_status)
+        self._apply_filter()
+
+    def _on_friend_games_error(self, sid, _msg):
+        self.friend_status[sid] = "error"
+        self.friends_btn.update_status(self.friend_status)
+        self._apply_filter()
+
     def _refresh(self):
         self.refresh_btn.setEnabled(False)
         self.dice_btn.setEnabled(False)
@@ -1008,6 +1489,13 @@ class SteamDice(QMainWindow):
         self.cooldown_label.setVisible(True)
         self._cooldown_timer.start()
         self._fetch_library()
+        # Also re-fetch each currently-selected friend's library so the filter
+        # reflects what they own right now.
+        if self.selected_friends:
+            for sid in self.selected_friends:
+                self.friend_status[sid] = "loading"
+            self.friends_btn.update_status(self.friend_status)
+            self._start_friend_games_fetch(list(self.selected_friends))
 
     def _on_cooldown_tick(self):
         self.cooldown_remaining -= 1
@@ -1064,6 +1552,11 @@ class SteamDice(QMainWindow):
             self.genres_thread.wait(12000)  # cover in-flight 10s HTTP timeout + final save
         if self.tags_table_thread and self.tags_table_thread.isRunning():
             self.tags_table_thread.wait(15000)
+        if self.friends_thread and self.friends_thread.isRunning():
+            self.friends_thread.wait(15000)
+        if self.friend_games_thread and self.friend_games_thread.isRunning():
+            self.friend_games_thread.stop()
+            self.friend_games_thread.wait(15000)
         super().closeEvent(a0)
 
 
