@@ -307,7 +307,7 @@ COMBO_STYLE = """
     }
 """
 
-FRIENDS_BTN_STYLE = """
+MULTISELECT_BTN_STYLE = """
     QPushButton {
         background-color: #2a3f5f;
         color: #c6d4df;
@@ -321,22 +321,30 @@ FRIENDS_BTN_STYLE = """
     QPushButton:disabled { color: #4a5a6a; border-color: #2a3a50; }
 """
 
-FRIENDS_POPUP_STYLE = """
-    QFrame#FriendsPopup {
+MULTISELECT_POPUP_STYLE = """
+    QFrame#MultiSelectPopup {
         background-color: #1b2838;
         border: 1px solid #3d5a7a;
         border-radius: 4px;
     }
-    QFrame#FriendsPopup QLabel { color: #8f98a0; }
-    QFrame#FriendsPopup QPushButton {
+    QFrame#MultiSelectPopup QLabel { color: #8f98a0; }
+    QFrame#MultiSelectPopup QPushButton {
         background-color: #2a3f5f;
         color: #c6d4df;
         border: 1px solid #3d5a7a;
         border-radius: 4px;
         padding: 2px 4px;
     }
-    QFrame#FriendsPopup QPushButton:hover { background-color: #3d5a7a; }
-    QFrame#FriendsPopup QListWidget {
+    QFrame#MultiSelectPopup QPushButton:hover { background-color: #3d5a7a; }
+    QFrame#MultiSelectPopup QLineEdit {
+        background-color: #2a3f5f;
+        color: #c6d4df;
+        border: 1px solid #3d5a7a;
+        border-radius: 3px;
+        padding: 3px 6px;
+    }
+    QFrame#MultiSelectPopup QLineEdit:focus { border-color: #5a8ab0; }
+    QFrame#MultiSelectPopup QListWidget {
         background-color: #2a3f5f;
         color: #c6d4df;
         border: 1px solid #3d5a7a;
@@ -344,9 +352,9 @@ FRIENDS_POPUP_STYLE = """
         outline: none;
         padding: 2px;
     }
-    QFrame#FriendsPopup QListWidget::item { padding: 3px 4px; }
-    QFrame#FriendsPopup QListWidget::item:selected,
-    QFrame#FriendsPopup QListWidget::item:hover { background-color: #3d6b9e; }
+    QFrame#MultiSelectPopup QListWidget::item { padding: 3px 4px; }
+    QFrame#MultiSelectPopup QListWidget::item:selected,
+    QFrame#MultiSelectPopup QListWidget::item:hover { background-color: #3d6b9e; }
 """
 
 REFRESH_STYLE = """
@@ -591,8 +599,8 @@ class FriendsPopup(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent, Qt.WindowType.Popup)
-        self.setObjectName("FriendsPopup")
-        self.setStyleSheet(FRIENDS_POPUP_STYLE)
+        self.setObjectName("MultiSelectPopup")
+        self.setStyleSheet(MULTISELECT_POPUP_STYLE)
         self.setFixedWidth(240)
 
         layout = QVBoxLayout(self)
@@ -671,7 +679,7 @@ class FriendsButton(QPushButton):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setStyleSheet(FRIENDS_BTN_STYLE)
+        self.setStyleSheet(MULTISELECT_BTN_STYLE)
         self.popup = FriendsPopup(self)
         self.popup.selection_changed.connect(self._on_selection_changed)
         self.popup.refresh_requested.connect(self.refresh_requested)
@@ -719,6 +727,139 @@ class FriendsButton(QPushButton):
     def _update_label(self):
         n = len(self._selected)
         self.setText(f"Friends ({n}) ▾" if n else "Friends ▾")
+
+
+class TagsPopup(QFrame):
+    """Borderless popup with a search input and checkable tag list."""
+    selection_changed = pyqtSignal(set)
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.WindowType.Popup)
+        self.setObjectName("MultiSelectPopup")
+        self.setStyleSheet(MULTISELECT_POPUP_STYLE)
+        self.setFixedWidth(260)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Search tags…")
+        self.search_input.textChanged.connect(self._apply_search_filter)
+        layout.addWidget(self.search_input)
+
+        self.status_label = QLabel("")
+        status_font = QFont()
+        status_font.setPointSize(8)
+        self.status_label.setFont(status_font)
+        layout.addWidget(self.status_label)
+
+        self.list_widget = QListWidget()
+        self.list_widget.setMinimumHeight(220)
+        self.list_widget.setMaximumHeight(420)
+        self.list_widget.itemChanged.connect(self._on_item_changed)
+        layout.addWidget(self.list_widget)
+
+        self._suppress = False
+
+    def populate(self, tags, selected):
+        """tags: sorted iterable of tag-name strings; selected: set of names."""
+        self._suppress = True
+        self.list_widget.clear()
+        for t in tags:
+            item = QListWidgetItem(t)
+            item.setData(Qt.ItemDataRole.UserRole, t)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.CheckState.Checked if t in selected else Qt.CheckState.Unchecked
+            )
+            self.list_widget.addItem(item)
+        self._suppress = False
+        self._apply_search_filter(self.search_input.text())
+
+    def _apply_search_filter(self, text):
+        needle = text.lower().strip()
+        total = self.list_widget.count()
+        visible = 0
+        for i in range(total):
+            it = self.list_widget.item(i)
+            if it is None:
+                continue
+            label = (it.data(Qt.ItemDataRole.UserRole) or it.text() or "").lower()
+            match = needle in label if needle else True
+            it.setHidden(not match)
+            if match:
+                visible += 1
+        if needle:
+            self.status_label.setText(f"{visible} of {total} tag(s)")
+        else:
+            self.status_label.setText(f"{total} tag(s)")
+
+    def showEvent(self, a0):
+        super().showEvent(a0)
+        # Auto-focus the search field so the user can start typing immediately.
+        self.search_input.setFocus()
+
+    def _on_item_changed(self, _item):
+        if self._suppress:
+            return
+        selected = set()
+        for i in range(self.list_widget.count()):
+            it = self.list_widget.item(i)
+            if it is None:
+                continue
+            if it.checkState() == Qt.CheckState.Checked:
+                selected.add(it.data(Qt.ItemDataRole.UserRole))
+        self.selection_changed.emit(selected)
+
+
+class TagsButton(QPushButton):
+    """Combo-styled button that opens a checkable tag list popup with search."""
+    selection_changed = pyqtSignal(set)
+    locked = pyqtSignal()  # clicked while no tags are loaded
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet(MULTISELECT_BTN_STYLE)
+        self.popup = TagsPopup(self)
+        self.popup.selection_changed.connect(self._on_selection_changed)
+        self._tags = []
+        self._selected = set()
+        self._unlocked = False
+        self._update_label()
+        self.clicked.connect(self._handle_click)
+
+    def _handle_click(self):
+        if self._unlocked and self._tags:
+            self._show_popup()
+        else:
+            self.locked.emit()
+
+    def _show_popup(self):
+        pos = self.mapToGlobal(QPoint(0, self.height()))
+        self.popup.move(pos)
+        self.popup.show()
+
+    def populate(self, tags):
+        self._tags = list(tags)
+        # Drop any selected tag that disappeared from the cache.
+        self._selected = {t for t in self._selected if t in self._tags}
+        if self._tags:
+            self._unlocked = True
+        self.popup.populate(self._tags, self._selected)
+        self._update_label()
+
+    def selected(self):
+        return set(self._selected)
+
+    def _on_selection_changed(self, selected):
+        self._selected = selected
+        self._update_label()
+        self.selection_changed.emit(selected)
+
+    def _update_label(self):
+        n = len(self._selected)
+        self.setText(f"Tags ({n}) ▾" if n else "Tags ▾")
 
 
 DIALOG_STYLE = """
@@ -915,7 +1056,7 @@ class SteamDice(QMainWindow):
         self.genre_combo.popup_blocked.connect(self._prompt_genre_fetch)
 
         # Always visible (empty text when idle) so the column height stays the
-        # same as the filter and tag columns — keeps all three combos aligned.
+        # same as the sibling columns — keeps all four controls aligned.
         self.genre_progress_label = QLabel()
         progress_font = QFont()
         progress_font.setPointSize(8)
@@ -923,13 +1064,14 @@ class SteamDice(QMainWindow):
         self.genre_progress_label.setStyleSheet("color: #4a5a6a;")
         top_row.addLayout(_combo_column(self.genre_combo, self.genre_progress_label))
 
-        # Tag filter (uses store_tags from appinfo.vdf)
-        self.tag_combo = LazyComboBox()
-        self.tag_combo.addItem("All tags")
-        self.tag_combo.setEnabled(False)
-        self.tag_combo.currentIndexChanged.connect(self._apply_filter)
-        self.tag_combo.popup_blocked.connect(self._prompt_tags_fetch)
-        top_row.addLayout(_combo_column(self.tag_combo, QLabel()))
+        # Tag filter (multi-select via checklist popup with search; uses
+        # store_tags from appinfo.vdf — same source as before, just AND'd
+        # over multiple selections).
+        self.tags_btn = TagsButton()
+        self.tags_btn.setEnabled(False)
+        self.tags_btn.selection_changed.connect(self._apply_filter)
+        self.tags_btn.locked.connect(self._prompt_tags_fetch)
+        top_row.addLayout(_combo_column(self.tags_btn, QLabel()))
 
         # Friends filter (multi-select via checklist popup). Intersects the user's
         # library with each selected friend's owned-game set so only games
@@ -946,8 +1088,6 @@ class SteamDice(QMainWindow):
         # When the cache already has data, allow the dropdowns to open immediately.
         if any(isinstance(e, dict) and e.get("genres") for e in self.taxonomy_cache.values()):
             self.genre_combo.set_allow_popup(True)
-        if any(isinstance(e, dict) and e.get("tags") for e in self.taxonomy_cache.values()):
-            self.tag_combo.set_allow_popup(True)
 
         top_row.addStretch()
 
@@ -1131,7 +1271,7 @@ class SteamDice(QMainWindow):
         self.installed_appids = _scan_installed_appids()
         self.filter_combo.setEnabled(True)
         self.genre_combo.setEnabled(True)
-        self.tag_combo.setEnabled(True)
+        self.tags_btn.setEnabled(True)
         self.friends_btn.setEnabled(True)
 
         # Try Steam's local appinfo.vdf cache first — instant, no network.
@@ -1140,7 +1280,7 @@ class SteamDice(QMainWindow):
         self._read_appinfo_into_cache()
 
         self._rebuild_genre_combo()
-        self._rebuild_tag_combo()
+        self._rebuild_tags_btn()
         self.refresh_btn.setEnabled(True)
         self._apply_filter()
 
@@ -1161,8 +1301,6 @@ class SteamDice(QMainWindow):
             pass
         if any(e.get("genres") for e in local.values()):
             self.genre_combo.set_allow_popup(True)
-        if any(e.get("tags") for e in local.values()):
-            self.tag_combo.set_allow_popup(True)
 
     def _fetch_tags_table(self):
         if self.tags_table_thread and self.tags_table_thread.isRunning():
@@ -1185,7 +1323,7 @@ class SteamDice(QMainWindow):
             pass
         # Re-read appinfo now that we can translate tag IDs.
         self._read_appinfo_into_cache()
-        self._rebuild_tag_combo()
+        self._rebuild_tags_btn()
         self._apply_filter()
 
     def _on_library_error(self, msg):
@@ -1210,11 +1348,13 @@ class SteamDice(QMainWindow):
                 if genre in self.taxonomy_cache.get(str(g["appid"]), {}).get("genres", [])
             ]
 
-        tag = self.tag_combo.currentData()
-        if tag:
+        tags = self.tags_btn.selected()
+        if tags:
             games = [
                 g for g in games
-                if tag in self.taxonomy_cache.get(str(g["appid"]), {}).get("tags", [])
+                if tags.issubset(
+                    self.taxonomy_cache.get(str(g["appid"]), {}).get("tags", [])
+                )
             ]
 
         # Friend filter: intersection — keep only games every selected friend
@@ -1263,24 +1403,15 @@ class SteamDice(QMainWindow):
                 self.genre_combo.setCurrentIndex(idx)
         self.genre_combo.blockSignals(False)
 
-    def _rebuild_tag_combo(self):
-        """Rebuild the tag dropdown from the current cache, preserving selection."""
-        current = self.tag_combo.currentData()
+    def _rebuild_tags_btn(self):
+        """Rebuild the tag list from the current cache. Selection is preserved
+        by TagsButton.populate (drops any tag that's no longer in the cache)."""
         all_tags = sorted({
             t for entry in self.taxonomy_cache.values()
             if isinstance(entry, dict)
             for t in entry.get("tags", [])
         })
-        self.tag_combo.blockSignals(True)
-        self.tag_combo.clear()
-        self.tag_combo.addItem("All tags", None)
-        for t in all_tags:
-            self.tag_combo.addItem(t, t)
-        if current:
-            idx = self.tag_combo.findData(current)
-            if idx >= 0:
-                self.tag_combo.setCurrentIndex(idx)
-        self.tag_combo.blockSignals(False)
+        self.tags_btn.populate(all_tags)
 
     def _prompt_genre_fetch(self):
         if self.genres_thread and self.genres_thread.isRunning():
@@ -1321,9 +1452,9 @@ class SteamDice(QMainWindow):
         self.genres_thread.start()
 
     def _prompt_tags_fetch(self):
-        # The tag combo only has data when both the tag-id table AND appinfo.vdf
-        # are available. There's no API fallback for tags, so just explain the
-        # situation if we can't populate it.
+        # The tag list only populates when both the tag-id table AND
+        # appinfo.vdf are available. There's no API fallback for tags, so just
+        # explain the situation if we can't populate it.
         try:
             from steam.utils.appcache import parse_appinfo  # noqa: F401
             has_steam = True
