@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
 from PyQt6.QtCore import Qt, QPoint, QSettings, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QPixmap, QFont, QIcon
 
-VERSION = "v0.1.0"
+VERSION = "v0.2.0"
 
 def _get_version():
     try:
