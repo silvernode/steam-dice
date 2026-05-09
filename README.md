@@ -13,6 +13,8 @@ A small desktop app that picks a random game from your Steam library and lets yo
   - **Tags** — multi-select popup with a search box; a game must carry every selected tag to survive
   - **Friends** — multi-select popup; picks games every selected friend also owns, perfect for "what should we play tonight?"
 - **Play** button launches the selected game immediately via Steam
+- **Store Page** button opens the rolled game's Steam store page in your browser — handy for checking screenshots, reviews, or gifting it to a friend
+- **Optional store-price label** (off by default) shows the current store price under the title, with a configurable format (final only, with discount %, strikethrough original, or full strike + sale + %) — useful for spotting sales when picking a gift
 - Settings dialog for your API key and Steam ID, persisted across sessions (API key kept in your system keyring)
 - Refresh button with a 60-second cooldown to avoid hammering the Steam API; refreshing also re-fetches selected friends' libraries
 - Clean Steam-themed dark UI built with PyQt6
@@ -84,8 +86,9 @@ Once loaded:
   - **Tags ▾** — opens a popup with a search box and checkboxes; selected tags are AND'd, so a game must carry every checked tag
   - **Friends ▾** — opens a popup listing your Steam friends; check any number to keep only games every selected friend also owns
 - Click **Play** to launch the rolled game via Steam
+- Click **Store Page** to open the rolled game's Steam store page in your browser
 - Click ⟳ to re-fetch your library (60s cooldown applies); selected friends' libraries refresh too
-- Click ⚙ to update your credentials at any time
+- Click ⚙ to update your credentials, toggle the store-price label, or change its format
 
 ### Friends filter prerequisites
 
