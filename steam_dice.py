@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sys
+import time
 import random
 import subprocess
 import requests
@@ -13,8 +14,8 @@ import keyring
 if os.environ.get("WAYLAND_DISPLAY"):
     os.environ.setdefault("QT_QPA_PLATFORM", "wayland")
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                              QPushButton, QLabel, QComboBox, QDialog, QDialogButtonBox, QLineEdit,
-                              QMessageBox, QFrame, QListWidget, QListWidgetItem)
+                              QPushButton, QLabel, QComboBox, QCheckBox, QDialog, QDialogButtonBox,
+                              QLineEdit, QMessageBox, QFrame, QListWidget, QListWidgetItem)
 from PyQt6.QtCore import Qt, QPoint, QSettings, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QPixmap, QFont, QIcon
 
@@ -250,11 +251,21 @@ IMG_H = 215
 MARGIN = 20
 TOP_ROW_H = 46        # refresh button (28) + gap (4) + cooldown label (14)
 TITLE_H = 30
+PRICE_H = 18
 STATUS_H = 20
 DICE_H = 100
 SPACING = 12
 PLAY_BTN_H = 34
 REFRESH_COOLDOWN = 60  # seconds
+PRICE_CACHE_TTL = 15 * 60  # seconds; sale state changes too fast for longer caching
+
+# Price format keys persisted in QSettings; combo display order matches.
+PRICE_FORMAT_OPTIONS = [
+    ("full",      "$̶1̶9̶.̶9̶9̶  $9.99 (-50%)"),
+    ("strike",    "$̶1̶9̶.̶9̶9̶  $9.99"),
+    ("final_pct", "$9.99 (-50%)"),
+    ("final",     "$9.99"),
+]
 # Window is ~40px wider than image+margin to fit a fourth control (Friends) in
 # the top filter row alongside install/genre/tag combos.
 WIN_W = IMG_W + MARGIN * 2 + 40
@@ -439,6 +450,37 @@ class FetchImageThread(QThread):
             self.done.emit(pixmap)
         except Exception:
             self.done.emit(QPixmap())
+
+
+class FetchPriceThread(QThread):
+    # status: "priced" (data is price_overview dict), "free" (no price_overview but
+    # the app exists), or "unavailable" (lookup failed / app not on store).
+    done = pyqtSignal(int, str, dict)  # appid, status, data
+
+    def __init__(self, appid):
+        super().__init__()
+        self.appid = appid
+
+    def run(self):
+        try:
+            url = (
+                "https://store.steampowered.com/api/appdetails"
+                f"?appids={self.appid}&filters=price_overview"
+            )
+            r = requests.get(url, timeout=10)
+            r.raise_for_status()
+            entry = r.json().get(str(self.appid), {})
+            if not entry.get("success"):
+                self.done.emit(self.appid, "unavailable", {})
+                return
+            data = entry.get("data") or {}
+            price = data.get("price_overview")
+            if price:
+                self.done.emit(self.appid, "priced", price)
+            else:
+                self.done.emit(self.appid, "free", {})
+        except Exception:
+            self.done.emit(self.appid, "unavailable", {})
 
 
 class FetchGenresThread(QThread):
@@ -949,6 +991,37 @@ class SettingsDialog(QDialog):
         id_help.setStyleSheet("color: #8f98a0; font-size: 9pt; padding-bottom: 10px;")
         layout.addWidget(id_help)
 
+        # --- Store price ---
+        layout.addWidget(QLabel("<b>Store price</b>"))
+        self.price_check = QCheckBox("Show current Steam store price under the title")
+        self.price_check.setChecked(settings.value("show_price", False, type=bool))
+        layout.addWidget(self.price_check)
+
+        fmt_row = QHBoxLayout()
+        fmt_row.setSpacing(6)
+        fmt_label = QLabel("Format:")
+        fmt_label.setStyleSheet("color: #8f98a0;")
+        fmt_row.addWidget(fmt_label)
+        self.price_format_combo = QComboBox()
+        for key, sample in PRICE_FORMAT_OPTIONS:
+            self.price_format_combo.addItem(sample, key)
+        saved_fmt = settings.value("price_format", "full")
+        idx = self.price_format_combo.findData(saved_fmt)
+        self.price_format_combo.setCurrentIndex(max(idx, 0))
+        fmt_row.addWidget(self.price_format_combo, 1)
+        layout.addLayout(fmt_row)
+
+        self.price_format_combo.setEnabled(self.price_check.isChecked())
+        self.price_check.toggled.connect(self.price_format_combo.setEnabled)
+
+        price_help = QLabel(
+            'Disabled by default. When on, fetches the public store price for the rolled game '
+            '(handy for spotting gift-able sales). Cached for 15 minutes per game.'
+        )
+        price_help.setWordWrap(True)
+        price_help.setStyleSheet("color: #8f98a0; font-size: 9pt; padding-bottom: 10px;")
+        layout.addWidget(price_help)
+
         # --- Buttons ---
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
@@ -974,6 +1047,8 @@ class SettingsDialog(QDialog):
         settings = QSettings("butter", "steam-dice")
         settings.remove("api_key")  # migrate away from plaintext storage
         settings.setValue("steam_id", steam_id)
+        settings.setValue("show_price", self.price_check.isChecked())
+        settings.setValue("price_format", self.price_format_combo.currentData())
         self.accept()
 
 
@@ -990,6 +1065,11 @@ class SteamDice(QMainWindow):
         self.tags_table = _load_tags_table()
         self.genres_thread = None
         self.tags_table_thread = None
+
+        # Store-price feature: opt-in via settings; in-memory cache only.
+        # cache value: (timestamp, status, data) where status is "priced" / "free" / "unavailable".
+        self.price_thread = None
+        self.price_cache = {}
 
         # Friends filter state. Friend list comes from disk; per-friend libraries
         # populate lazily into self.friend_games as the user toggles them on.
@@ -1149,6 +1229,17 @@ class SteamDice(QMainWindow):
         self.title_label.setVisible(False)
         layout.addWidget(self.title_label)
 
+        # Store price (only visible when enabled in settings + value loaded)
+        self.price_label = QLabel()
+        self.price_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.price_label.setTextFormat(Qt.TextFormat.RichText)
+        price_font = QFont()
+        price_font.setPointSize(10)
+        self.price_label.setFont(price_font)
+        self.price_label.setFixedHeight(PRICE_H)
+        self.price_label.setVisible(False)
+        layout.addWidget(self.price_label)
+
         # Game image
         self.image_label = QLabel()
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1269,10 +1360,12 @@ class SteamDice(QMainWindow):
         self.fetch_thread.start()
 
     def _open_settings(self):
-        old_steam_id = QSettings("butter", "steam-dice").value("steam_id", "")
+        s = QSettings("butter", "steam-dice")
+        old_steam_id = s.value("steam_id", "")
         dlg = SettingsDialog(self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
-            new_steam_id = QSettings("butter", "steam-dice").value("steam_id", "")
+            s = QSettings("butter", "steam-dice")
+            new_steam_id = s.value("steam_id", "")
             if old_steam_id and new_steam_id != old_steam_id:
                 # Different account — friend list belongs to the previous user.
                 # Clear in-memory state; the next click on Friends will re-fetch.
@@ -1281,6 +1374,14 @@ class SteamDice(QMainWindow):
                 self.friend_games = {}
                 self.friend_status = {}
                 self.friends_btn.clear()
+
+            # Sync price label visibility to the current setting state.
+            if not s.value("show_price", False, type=bool):
+                self.price_label.clear()
+                self.price_label.setVisible(False)
+            elif self.current_appid is not None:
+                self._maybe_fetch_price(self.current_appid)
+
             self.status_label.setText("Loading library…")
             self.dice_btn.setEnabled(False)
             self.filter_combo.setEnabled(False)
@@ -1677,6 +1778,8 @@ class SteamDice(QMainWindow):
         self.image_label.setVisible(True)
         self.play_btn.setVisible(False)
         self.store_btn.setVisible(False)
+        self.price_label.clear()
+        self.price_label.setVisible(False)
         self.status_label.setText("")
 
         if self.image_thread is not None:
@@ -1684,6 +1787,8 @@ class SteamDice(QMainWindow):
         self.image_thread = FetchImageThread(game["appid"])
         self.image_thread.done.connect(self._on_image_loaded)
         self.image_thread.start()
+
+        self._maybe_fetch_price(game["appid"])
 
     def _on_image_loaded(self, pixmap):
         self.dice_btn.setEnabled(True)
@@ -1708,6 +1813,69 @@ class SteamDice(QMainWindow):
         if self.current_appid is not None:
             subprocess.Popen(["xdg-open", f"https://store.steampowered.com/app/{self.current_appid}/"])
 
+    def _maybe_fetch_price(self, appid):
+        s = QSettings("butter", "steam-dice")
+        if not s.value("show_price", False, type=bool):
+            return
+
+        cached = self.price_cache.get(appid)
+        if cached and time.time() - cached[0] < PRICE_CACHE_TTL:
+            self._render_price(appid, cached[1], cached[2])
+            return
+
+        if self.price_thread is not None and self.price_thread.isRunning():
+            try:
+                self.price_thread.done.disconnect()
+            except TypeError:
+                pass
+        self.price_thread = FetchPriceThread(appid)
+        self.price_thread.done.connect(self._on_price_loaded)
+        self.price_thread.start()
+
+    def _on_price_loaded(self, appid, status, data):
+        self.price_cache[appid] = (time.time(), status, data)
+        self._render_price(appid, status, data)
+
+    def _render_price(self, appid, status, data):
+        # Race protection: another roll happened while we were fetching.
+        if appid != self.current_appid:
+            return
+        s = QSettings("butter", "steam-dice")
+        if not s.value("show_price", False, type=bool):
+            return
+        fmt = s.value("price_format", "full")
+        text = self._format_price(status, data, fmt)
+        self.price_label.setText(text)
+        self.price_label.setVisible(True)
+
+    @staticmethod
+    def _format_price(status, data, style):
+        if status == "free":
+            return '<span style="color: #8f98a0;">Free</span>'
+        if status == "unavailable" or not data:
+            return '<span style="color: #8f98a0;">—</span>'
+
+        final = data.get("final_formatted") or ""
+        initial = data.get("initial_formatted") or ""
+        pct = data.get("discount_percent") or 0
+        on_sale = pct > 0 and initial and initial != final
+
+        if not on_sale:
+            return f'<span style="color: #c7d5e0;">{final}</span>'
+
+        strike = f'<s style="color: #6b7884;">{initial}</s>'
+        sale = f'<span style="color: #a4d007;">{final}</span>'
+        pct_part = f'<span style="color: #a4d007;"> (-{pct}%)</span>'
+
+        if style == "final":
+            return sale
+        if style == "final_pct":
+            return f"{sale}{pct_part}"
+        if style == "strike":
+            return f"{strike} &nbsp; {sale}"
+        # "full" (default)
+        return f"{strike} &nbsp; {sale}{pct_part}"
+
     def closeEvent(self, a0):
         if self.genres_thread and self.genres_thread.isRunning():
             self.genres_thread.stop()
@@ -1719,6 +1887,8 @@ class SteamDice(QMainWindow):
         if self.friend_games_thread and self.friend_games_thread.isRunning():
             self.friend_games_thread.stop()
             self.friend_games_thread.wait(15000)
+        if self.price_thread and self.price_thread.isRunning():
+            self.price_thread.wait(15000)
         super().closeEvent(a0)
 
 
