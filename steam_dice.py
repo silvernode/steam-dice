@@ -1157,12 +1157,13 @@ class SteamDice(QMainWindow):
         self.image_label.setVisible(False)
         layout.addWidget(self.image_label)
 
-        # Play button
-        self.play_btn = QPushButton("  Play")
-        self.play_btn.setIcon(QIcon.fromTheme("media-playback-start"))
+        # Action buttons: Play | Store Page
         play_font = QFont()
         play_font.setPointSize(11)
         play_font.setBold(True)
+
+        self.play_btn = QPushButton("  Play")
+        self.play_btn.setIcon(QIcon.fromTheme("media-playback-start"))
         self.play_btn.setFont(play_font)
         self.play_btn.setFixedHeight(34)
         self.play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1179,7 +1180,31 @@ class SteamDice(QMainWindow):
         """)
         self.play_btn.setVisible(False)
         self.play_btn.clicked.connect(self._launch_game)
-        layout.addWidget(self.play_btn)
+
+        self.store_btn = QPushButton("  Store Page")
+        self.store_btn.setIcon(QIcon.fromTheme("applications-internet"))
+        self.store_btn.setFont(play_font)
+        self.store_btn.setFixedHeight(34)
+        self.store_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.store_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #316282;
+                color: #c6d4df;
+                border: none;
+                border-radius: 4px;
+                padding: 0 16px;
+            }
+            QPushButton:hover { background-color: #4082a3; }
+            QPushButton:pressed { background-color: #1f4257; }
+        """)
+        self.store_btn.setVisible(False)
+        self.store_btn.clicked.connect(self._open_store_page)
+
+        action_row = QHBoxLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.addWidget(self.play_btn)
+        action_row.addWidget(self.store_btn)
+        layout.addLayout(action_row)
 
         # Status / loading text
         self.status_label = QLabel("Loading library…")
@@ -1651,6 +1676,7 @@ class SteamDice(QMainWindow):
         self.image_label.setText("Loading…")
         self.image_label.setVisible(True)
         self.play_btn.setVisible(False)
+        self.store_btn.setVisible(False)
         self.status_label.setText("")
 
         if self.image_thread is not None:
@@ -1662,6 +1688,7 @@ class SteamDice(QMainWindow):
     def _on_image_loaded(self, pixmap):
         self.dice_btn.setEnabled(True)
         self.play_btn.setVisible(True)
+        self.store_btn.setVisible(True)
         if pixmap.isNull():
             self.image_label.setText("No image available")
         else:
@@ -1676,6 +1703,10 @@ class SteamDice(QMainWindow):
     def _launch_game(self):
         if self.current_appid is not None:
             subprocess.Popen(["xdg-open", f"steam://rungameid/{self.current_appid}"])
+
+    def _open_store_page(self):
+        if self.current_appid is not None:
+            subprocess.Popen(["xdg-open", f"https://store.steampowered.com/app/{self.current_appid}/"])
 
     def closeEvent(self, a0):
         if self.genres_thread and self.genres_thread.isRunning():
