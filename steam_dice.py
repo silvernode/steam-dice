@@ -965,12 +965,20 @@ class SettingsDialog(QDialog):
 
         key_help = QLabel(
             'Get your free key at '
-            '<a href="https://steamcommunity.com/dev/apikey">steamcommunity.com/dev/apikey</a>.'
-            '<br>Log in with Steam, enter any domain name (e.g. <i>localhost</i>), and copy the key shown.'
+            '<a href="https://steamcommunity.com/dev/apikey">steamcommunity.com/dev/apikey</a>. '
+            'Log in with Steam, then copy the 32-character key shown after registering.'
+            '<br><br>'
+            '<b>Don\'t have a domain?</b> You don\'t need one. The <i>Domain Name</i> field '
+            'on Steam\'s page is <b>not validated</b> — type literally anything '
+            '(<i>localhost</i>, your name, <i>personal</i>) and click <b>Register</b>.'
         )
         key_help.setOpenExternalLinks(True)
         key_help.setWordWrap(True)
-        key_help.setStyleSheet("color: #8f98a0; font-size: 9pt; padding-bottom: 10px;")
+        key_help.setStyleSheet(
+            "color: #c7d5e0; font-size: 9pt; "
+            "background-color: #1f2a36; border: 1px solid #2a475e; border-radius: 4px; "
+            "padding: 8px 10px; margin-bottom: 10px;"
+        )
         layout.addWidget(key_help)
 
         # --- Steam ID ---

@@ -53,9 +53,17 @@ pacman -S python-steam
 
 You need a free Steam Web API key to fetch your library.
 
-1. Go to [steamcommunity.com/dev/apikey](https://steamcommunity.com/dev/apikey) and log in.
-2. Enter any domain name (e.g. `localhost`) and click **Register**.
-3. Copy the 32-character key shown on the page.
+1. Go to [steamcommunity.com/dev/apikey](https://steamcommunity.com/dev/apikey) and log in with your Steam account.
+2. In the **Domain Name** field, type any string and click **Register**.
+3. Copy the 32-character key shown on the next page — paste it into Steam Dice's settings dialog.
+
+> **Don't have a domain?** You don't need one. Steam's "Domain Name" field is **not validated** — `localhost`, your name, `personal`, or any other text works. It's just a label Steam stores alongside your key; it doesn't have to be a real domain you own.
+
+If the page refuses to issue a key, the usual causes are:
+
+- Your Steam account has spent **less than $5** lifetime on Steam (Valve's anti-spam threshold for API access).
+- Your account is **limited** (new account with no purchases) or has an unverified email.
+- You're signed into the wrong Steam account in your browser.
 
 ### 2. Steam ID (64-bit)
 
